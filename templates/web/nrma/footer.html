@@ -1,0 +1,75 @@
+                    [% IF pagefooter %]
+                    <footer role="content-info">
+                        <div class="tablewrapper bordered">
+                            <div id="footer-mobileapps">
+<p></p>
+<!-- linkedin block -->
+<script src="//platform.linkedin.com/in.js" type="text/javascript"></script>
+<script type="IN/Share" data-url="nsw.fixmystreet.org.au" data-counter="right"></script>
+
+<!-- twitter blocks -->
+<a href="https://twitter.com/FixMyStreetAU" class="twitter-follow-button" data-show-count="false" data-dnt="true">Follow @FixMyStreetAU</a>
+<script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0];if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src="//platform.twitter.com/widgets.js";fjs.parentNode.insertBefore(js,fjs);}}(document,"script","twitter-wjs");</script>
+
+<a href="https://twitter.com/share" class="twitter-share-button" data-url="http://nsw.fixmystreet.org.au" data-text="Got a problem in your street in NSW? Put it on the map and @FixMyStreetAU will tell your Council about it" data-related="FixMyStreetAU" data-dnt="true">Tweet</a>
+<script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0];if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src="//platform.twitter.com/widgets.js";fjs.parentNode.insertBefore(js,fjs);}}(document,"script","twitter-wjs");</script>
+
+<!-- facebook block -->
+<div id="fb-root"></div>
+<script>(function(d, s, id) {
+  var js, fjs = d.getElementsByTagName(s)[0];
+  if (d.getElementById(id)) return;
+  js = d.createElement(s); js.id = id;
+  js.src = "//connect.facebook.net/en_GB/all.js#xfbml=1&appId=127321647437166";
+  fjs.parentNode.insertBefore(js, fjs);
+}(document, 'script', 'facebook-jssdk'));</script>
+<div class="fb-like-box" data-href="http://www.facebook.com/FixMyStreetAustralia" data-width="400" data-height="200" data-show-faces="true" data-stream="false" data-header="false"></div>
+
+                                <h4>Mobile apps</h4>
+
+                                <p>
+                                    <a href="/contact" target="_blank">Contact us</a> if you'd like us to build you a mobile app.
+                                </p>
+                            </div>
+
+                            <div id="footer-help">
+                                        <h4>[% loc('Are you from a council?') %]</h4>
+                                        <p>[% loc('Would you like better integration with FixMyStreet? <a href="http://www.openlocal.org.au/fixmystreet/for-councils">Find out about FixMyStreet for councils</a>.') %]</p>
+                            </div>
+                        </div>
+                        <p><a href="/privacy">Privacy and cookies</a></p>
+                    </footer>
+                    [% END %]
+                </div><!-- .content role=main -->
+            </div><!-- .container -->
+        </div><!-- .table-cell -->
+
+        <div class="nav-wrapper">
+            <div class="nav-wrapper-2">
+                <div id="main-nav" role="navigation">
+                    <ul id="mysoc-menu">
+                        <li><a id="openlocal-logo" href="http://www.openlocal.org.au/">Open Local</a></li>[%
+                        %]<li><a href="http://www.openlocal.org.au/support/">Support</a></li>[%
+                        %]<li><a href="http://www.openlocal.org.au/projects/">Our Sites</a></li>
+                    </ul>
+
+                    <ul id="main-menu">
+                        <li><[% IF c.req.uri.path == '/' %]span[% ELSE %]a href="/"[% END %] class="report-a-problem-btn"
+                            >[% loc("Report a problem") %]</[% c.req.uri.path == '/' ? 'span' : 'a' %]></li>[%
+                        %]<li><[% IF c.req.uri.path == '/my' %]span[% ELSE %]a href="/my"[% END
+                            %]>[% loc("Your reports") %]</[% c.req.uri.path == '/my' ? 'span' : 'a' %]></li>[%
+                        %]<li><[% IF c.req.uri.path == '/reports' %]span[% ELSE %]a href="/reports"[% END
+                            %]>[% loc("All reports") %]</[% c.req.uri.path == '/reports' ? 'span' : 'a' %]></li>[%
+                        %]<li><[% IF c.req.uri.path == '/alert' %]span[% ELSE %]a href="/alert[% pc ? '/list?pc=' : '' %][% pc | uri %]"[% END
+                            %]>[% loc("Local alerts") %]</[% c.req.uri.path == '/alert' ? 'span' : 'a' %]></li>[%
+                        %]<li><[% IF c.req.uri.path == '/faq' %]span[% ELSE %]a href="/faq"[% END
+                            %]>[% loc("Help") %]</[% c.req.uri.path == '/faq' ? 'span' : 'a' %]></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+<!-- [% INCLUDE 'debug_footer.html' %] -->
+    </div> <!-- .wrapper -->
+</body>
+</html>
