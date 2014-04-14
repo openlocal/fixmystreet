@@ -1,27 +1,8 @@
-[%
-    USE Comma;
-    # Note - if we want to i18n the commas we should try 
-    # 'Template::Plugin::Number::Format'
-%]
-
-[%
-    stats = c.cobrand.front_stats_data();
-
-    new_text =
-        stats.recency == '1 week'
-        ? nget(
-            "<big>%s</big> report in past week",
-            "<big>%s</big> reports in past week",
-            stats.new
-          )
-        : nget(
-            "<big>%s</big> report recently",
-            "<big>%s</big> reports recently",
-            stats.new
-         );
-    
-%]
+[% USE Comma %]
+[% stats = c.cobrand.front_stats_data %]
 
 <div id="front_stats">
-    <div>[% tprintf( new_text,     stats.new     ) | comma %]</div>
+    <div>[% tprintf( loc("<big>%s</big> reports"), stats ) | comma %]</div>
+    <div><a href="/local/">[% loc('Find latest local and national news') %]</a></div>
+    <div id="eha-app-link"><a href="https://itunes.apple.com/gb/app/empty-homes-spotter/id482550587?mt=8">Get the Empty Homes Spotter App for iPhone</a></div>
 </div>

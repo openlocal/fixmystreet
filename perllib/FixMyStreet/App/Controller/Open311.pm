@@ -100,7 +100,7 @@ sub error : Private {
 sub get_discovery : Private {
     my ( $self, $c ) = @_;
 
-    my $contact_email = $c->config->{CONTACT_EMAIL};
+    my $contact_email = $c->cobrand->contact_email;
     my $prod_url = 'http://www.fiksgatami.no/open311';
     my $test_url = 'http://fiksgatami-dev.nuug.no/open311';
     my $prod_changeset = '2011-04-08T00:00:00Z';
@@ -163,13 +163,13 @@ sub get_services : Private {
     my $categories = $c->model('DB::Contact')->not_deleted;
 
     if ($lat || $lon) {
-        my @area_types = $c->cobrand->area_types;
-        my $all_councils = mySociety::MaPit::call('point',
+        my $area_types = $c->cobrand->area_types;
+        my $all_areas = mySociety::MaPit::call('point',
                                                   "4326/$lon,$lat",
-                                                  type => \@area_types);
+                                                  type => $area_types);
         $categories = $categories->search( {
-            area_id => [ keys %$all_councils ],
-        } );
+            'body_areas.area_id' => [ keys %$all_areas ],
+        }, { join => { 'body' => 'body_areas' } } );
     }
 
     my @categories = $categories->search( undef, {
@@ -223,18 +223,10 @@ sub output_requests : Private {
     );
 
     my @problemlist;
-    my @councils;
     while ( my $problem = $problems->next ) {
         my $id = $problem->id;
 
         $problem->service( 'Web interface' ) unless $problem->service;
-
-        if ($problem->council) {
-            (my $council = $problem->council) =~ s/\|.*//g;
-            my @council_ids = split(/,/, $council);
-            push(@councils, @council_ids);
-            $problem->council( \@council_ids );
-        }
 
         $problem->state( $statusmap{$problem->state} );
 
@@ -248,18 +240,22 @@ sub output_requests : Private {
             'long' => [ $problem->longitude ],
             'status' => [ $problem->state ],
 #            'status_notes' => [ {} ],
-            'requested_datetime' => [ w3date($problem->confirmed_local) ],
-            'updated_datetime' => [ w3date($problem->lastupdate_local) ],
+            'requested_datetime' => [ w3date($problem->confirmed) ],
+            'updated_datetime' => [ w3date($problem->lastupdate) ],
 #            'expected_datetime' => [ {} ],
 #            'address' => [ {} ],
 #            'address_id' => [ {} ],
             'service_code' => [ $problem->category ],
             'service_name' => [ $problem->category ],
 #            'service_notice' => [ {} ],
-            'agency_responsible' =>  $problem->council , # FIXME Not according to Open311 v2
 #            'zipcode' => [ {} ],
             'interface_used' => [ $problem->service ], # Not in Open311 v2
         };
+
+        if ( $c->cobrand->moniker ne 'zurich' ) { # XXX
+            # FIXME Not according to Open311 v2
+            $request->{agency_responsible} = $problem->bodies;
+        }
 
         if ( !$problem->anonymous ) {
             # Not in Open311 v2
@@ -268,7 +264,7 @@ sub output_requests : Private {
         if ( $problem->whensent ) {
             # Not in Open311 v2
             $request->{'agency_sent_datetime'} =
-                [ w3date($problem->whensent_local) ];
+                [ w3date($problem->whensent) ];
         }
 
         # Extract number of updates
@@ -280,7 +276,7 @@ sub output_requests : Private {
             $request->{'comment_count'} = [ $updates ];
         }
 
-        my $display_photos = $c->cobrand->allow_photo_display;
+        my $display_photos = $c->cobrand->allow_photo_display($problem);
         if ($display_photos && $problem->photo) {
             my $url = $c->cobrand->base_url();
             my $imgurl = $url . "/photo/$id.full.jpeg";
@@ -288,12 +284,12 @@ sub output_requests : Private {
         }
         push(@problemlist, $request);
     }
-    my $areas_info = mySociety::MaPit::call('areas', \@councils);
+
     foreach my $request (@problemlist) {
         if ($request->{agency_responsible}) {
-            my @council_names = map { $areas_info->{$_}->{name} } @{$request->{agency_responsible}} ;
+            my @body_names = map { $_->name } values %{$request->{agency_responsible}} ;
             $request->{agency_responsible} =
-                [ {'recipient' => [ @council_names ] } ];
+                [ {'recipient' => [ @body_names ] } ];
         }
     }
     $c->forward( 'format_output', [ {
@@ -311,17 +307,17 @@ sub get_requests : Private {
     my $max_requests = $c->req->param('max_requests') || 0;
 
     # Only provide access to the published reports
+    my $states = FixMyStreet::DB::Result::Problem->visible_states();
+    delete $states->{unconfirmed};
     my $criteria = {
-        state => [ FixMyStreet::DB::Result::Problem->visible_states() ]
+        state => [ keys %$states ]
     };
 
     my %rules = (
         service_request_id => [ '=', 'id' ],
         service_code       => [ '=', 'category' ],
         status             => [ 'IN', 'state' ],
-        start_date         => [ '>=', 'confirmed' ],
-        end_date           => [ '<', 'confirmed' ],
-        agency_responsible => [ '~', 'council' ],
+        agency_responsible => [ '~', 'bodies_str' ],
         interface_used     => [ '=', 'service' ],
         has_photo          => [ '=', 'photo' ],
     );
@@ -365,6 +361,14 @@ sub get_requests : Private {
         $criteria->{$key} = { $op, $value };
     }
 
+    if ( $c->req->param('start_date') and $c->req->param('end_date') ) {
+        $criteria->{confirmed} = [ '-and' => { '>=', $c->req->param('start_date') }, { '<', $c->req->param('end_date') } ];
+    } elsif ( $c->req->param('start_date') ) {
+        $criteria->{confirmed} = { '>=', $c->req->param('start_date') };
+    } elsif ( $c->req->param('end_date') ) {
+        $criteria->{confirmed} = { '<', $c->req->param('end_date') };
+    }
+
     if ('rss' eq $c->stash->{format}) {
         $c->stash->{type} = 'new_problems';
         $c->forward( '/rss/lookup_type' );
@@ -405,8 +409,10 @@ sub get_request : Private {
         return;
     }
 
+    my $states = FixMyStreet::DB::Result::Problem->visible_states();
+    delete $states->{unconfirmed};
     my $criteria = {
-        state => [ FixMyStreet::DB::Result::Problem->visible_states() ],
+        state => [ keys %$states ],
         id => $id,
     };
     $c->forward( 'output_requests', [ $criteria ] );

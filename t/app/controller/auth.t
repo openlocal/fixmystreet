@@ -33,7 +33,7 @@ for my $test (
     my ( $email, $error_message ) = @$test;
     pass "--- testing bad email '$email' gives error '$error_message'";
     $mech->get_ok('/auth');
-    is_deeply $mech->form_errors, [], 'no errors initially';
+    is_deeply $mech->page_errors, [], 'no errors initially';
     $mech->submit_form_ok(
         {
             form_name => 'general_auth',
@@ -43,7 +43,7 @@ for my $test (
         "try to create an account with email '$email'"
     );
     is $mech->uri->path, '/auth', "still on auth page";
-    is_deeply $mech->form_errors, [ $error_message ], 'no errors initially';
+    is_deeply $mech->page_errors, [ $error_message ], 'errors match';
 }
 
 # create a new account
@@ -91,13 +91,8 @@ $mech->not_logged_in_ok;
     is $mech->uri->path, '/my', "redirected to the 'my' section of site";
     $mech->logged_in_ok;
 
-    # logout and try to use the token again
+    # logout
     $mech->log_out_ok;
-    $mech->get_ok($link);
-    is $mech->uri, $link, "not logged in";
-    $mech->content_contains( 'Link too old or already used',
-        'token now invalid' );
-    $mech->not_logged_in_ok;
 }
 
 # get a sign in email and change password

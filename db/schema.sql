@@ -4,8 +4,6 @@
 -- Copyright (c) 2006 UK Citizens Online Democracy. All rights reserved.
 -- Email: matthew@mysociety.org; WWW: http://www.mysociety.org/
 --
--- $Id: schema.sql,v 1.49 2009-11-10 13:53:33 louise Exp $
---
 
 -- secret
 -- A random secret.
@@ -18,22 +16,6 @@ create table secret (
 create table debugdate (
     override_today date
 );
-
--- Returns the date of "today", which can be overriden for testing.
-create function ms_current_date()
-    returns date as '
-    declare
-        today date;
-    begin
-        today = (select override_today from debugdate);
-        if today is not null then
-           return today;
-        else
-           return current_date;
-        end if;
-
-    end;
-' language 'plpgsql' stable;
 
 -- Returns the timestamp of current time, but with possibly overriden "today".
 create function ms_current_timestamp()
@@ -50,24 +32,57 @@ create function ms_current_timestamp()
     end;
 ' language 'plpgsql';
 
+-- table for sessions - needed by Catalyst::Plugin::Session::Store::DBIC
+create table sessions (
+    id           char(72) primary key,
+    session_data text,
+    expires      integer
+);
 
--- users, but call the table person rather than user so we don't have to quote
--- its name in every statement....
--- create table person (
---     id serial not null primary key,
---     name text,
---     email text not null,
---     password text,
---     website text,
---     numlogins integer not null default 0
--- );
--- 
--- create unique index person_email_idx on person(email);
+-- users table
+create table users (
+    id              serial  not null primary key,
+    email           text    not null unique,
+    name            text,
+    phone           text,
+    password        text    not null default '',
+    from_body       integer,
+    flagged         boolean not null default 'f',
+    title           text
+);
 
--- Who to send problems for a specific MaPit area ID to
+-- Record details of reporting bodies, including open311 configuration details
+create table body (
+    id           serial primary key,
+    name         text not null,
+    external_url text,
+    parent       integer references body(id),
+    endpoint     text,
+    jurisdiction text,
+    api_key      text,
+    send_method  text,
+    send_comments boolean not null default 'f',
+    comment_user_id int references users(id),
+    suppress_alerts boolean not null default 'f',
+    can_be_devolved boolean not null default 'f',
+    send_extended_statuses boolean not null default 'f',
+    deleted boolean not null default 'f'
+);
+
+create table body_areas (
+    body_id integer not null references body(id),
+    area_id integer not null
+);
+create unique index body_areas_body_id_area_id_idx on body_areas(body_id, area_id);
+
+-- Now can create reference from users to body
+ALTER TABLE users ADD CONSTRAINT users_from_body_fkey
+    FOREIGN KEY (from_body) REFERENCES body(id);
+
+-- The contact for a category within a particular body
 create table contacts (
     id serial primary key,
-    area_id integer not null,
+    body_id integer not null references body(id),
     category text not null default 'Other',
     email text not null,
     confirmed boolean not null,
@@ -81,9 +96,18 @@ create table contacts (
     note text not null,
 
     -- extra fields required for open311
-    extra text
+    extra text,
+
+    -- for things like missed bin collections
+    non_public boolean default 'f',
+
+    -- per contact endpoint configuration
+    endpoint     text,
+    jurisdiction text default '',
+    api_key      text default '',
+    send_method  text
 );
-create unique index contacts_area_id_category_idx on contacts(area_id, category);
+create unique index contacts_body_id_category_idx on contacts(body_id, category);
 
 -- History of changes to contacts - automatically updated
 -- whenever contacts is changed, using trigger below.
@@ -91,7 +115,7 @@ create table contacts_history (
     contacts_history_id serial not null primary key,
 
     contact_id integer not null,
-    area_id integer not null,
+    body_id integer not null,
     category text not null default 'Other',
     email text not null,
     confirmed boolean not null,
@@ -110,7 +134,7 @@ create table contacts_history (
 create function contacts_updated()
     returns trigger as '
     begin
-        insert into contacts_history (contact_id, area_id, category, email, editor, whenedited, note, confirmed, deleted) values (new.id, new.area_id, new.category, new.email, new.editor, new.whenedited, new.note, new.confirmed, new.deleted);
+        insert into contacts_history (contact_id, body_id, category, email, editor, whenedited, note, confirmed, deleted) values (new.id, new.body_id, new.category, new.email, new.editor, new.whenedited, new.note, new.confirmed, new.deleted);
         return new;
     end;
 ' language 'plpgsql';
@@ -120,24 +144,6 @@ create trigger contacts_update_trigger after update on contacts
 create trigger contacts_insert_trigger after insert on contacts
     for each row execute procedure contacts_updated();
 
--- table for sessions - needed by Catalyst::Plugin::Session::Store::DBIC
-create table sessions (
-    id           char(72) primary key,
-    session_data text,
-    expires      integer
-);
-
--- users table
-create table users (
-    id              serial  not null primary key,
-    email           text    not null unique,
-    name            text,
-    phone           text,
-    password        text    not null default '',
-    from_council    integer, -- id of council user is from or null/0 if not
-    flagged         boolean not null default 'f'
-);
-
 -- Problems reported by users of site
 create table problem (
     id serial not null primary key,
@@ -146,8 +152,8 @@ create table problem (
     postcode text not null,
     latitude double precision not null,
     longitude double precision not null,
-    council text, -- the council(s) we'll report this problem to
-    areas text not null, -- the voting areas this location is in
+    bodies_str text, -- the body(s) we'll report this problem to
+    areas text not null, -- the mapit areas this location is in
     category text not null default 'Other',
     title text not null,
     detail text not null,
@@ -173,12 +179,17 @@ create table problem (
         or state = 'investigating'
         or state = 'planned'
         or state = 'in progress'
+        or state = 'action scheduled'
         or state = 'closed'
         or state = 'fixed'
         or state = 'fixed - council'
         or state = 'fixed - user'
         or state = 'hidden'
         or state = 'partial'
+        or state = 'unable to fix'
+        or state = 'not responsible'
+        or state = 'duplicate'
+        or state = 'internal referral'
     ),
     lang text not null default 'en-gb',
     service text not null default '',
@@ -189,10 +200,32 @@ create table problem (
     send_questionnaire boolean not null default 't',
     extra text, -- extra fields required for open311
     flagged boolean not null default 'f',
-    geocode bytea
+    geocode bytea,
+    
+    -- logging sending failures (used by webservices)
+    send_fail_count integer not null default 0, 
+    send_fail_reason text, 
+    send_fail_timestamp timestamp,
+    
+    -- record send_method used, which can be used to infer usefulness of external_id
+    send_method_used text,
+
+    -- for things like missed bin collections
+    non_public BOOLEAN default 'f',
+
+    -- record details about messages from external sources, eg. message manager
+    external_source text,
+    external_source_id text,
+
+    -- number of me toos
+    interest_count integer default 0,
+
+    -- subcategory to enable filtering in reporting --
+    subcategory text
 );
 create index problem_state_latitude_longitude_idx on problem(state, latitude, longitude);
 create index problem_user_id_idx on problem ( user_id );
+create index problem_external_body_idx on problem(lower(external_body));
 
 create table questionnaire (
     id serial not null primary key,
@@ -299,13 +332,24 @@ create table comment (
         or problem_state = 'investigating'
         or problem_state = 'planned'
         or problem_state = 'in progress'
+        or problem_state = 'action scheduled'
         or problem_state = 'closed'
         or problem_state = 'fixed'
         or problem_state = 'fixed - council'
         or problem_state = 'fixed - user'
-    )
+        or problem_state = 'unable to fix'
+        or problem_state = 'not responsible'
+        or problem_state = 'duplicate'
+        or problem_state = 'internal referral'
+    ),
     -- other fields? one to indicate whether this was written by the council
     -- and should be highlighted in the display?
+    external_id text,
+    extra text,
+    send_fail_count integer not null default 0,
+    send_fail_reason text,
+    send_fail_timestamp timestamp,
+    whensent timestamp
 );
 
 create index comment_user_id_idx on comment(user_id);
@@ -405,19 +449,6 @@ create table admin_log (
       or object_type = 'user'
     ),
     object_id integer not null,
-    action text not null check (
-        action = 'edit'
-        or action = 'state_change' 
-        or action = 'resend'),
+    action text not null,
     whenedited timestamp not null default ms_current_timestamp()
 ); 
-
--- Record open 311 configuration details
-
-create table open311conf (
-    id           serial primary key,
-    area_id      integer not null unique,
-    endpoint     text not null,
-    jurisdiction text,
-    api_key      text
-);

@@ -184,14 +184,18 @@ sub create_alert : Private {
 
     unless ($alert) {
         $options->{cobrand}      = $c->cobrand->moniker();
-        $options->{cobrand_data} = $c->cobrand->extra_update_data();
+        $options->{cobrand_data} = '';
         $options->{lang}         = $c->stash->{lang_code};
 
         $alert = $c->model('DB::Alert')->new($options);
         $alert->insert();
     }
 
-    $alert->confirm() if $c->user && $c->user->id == $alert->user->id;
+    if ( $c->user && $c->user->id == $alert->user->id ) {
+        $alert->confirm();
+    } else {
+        $alert->confirmed(0);
+    }
 
     $c->stash->{alert} = $alert;
 }
@@ -403,13 +407,13 @@ Generate the details required to display the council/ward/area RSS feeds
 sub setup_council_rss_feeds : Private {
     my ( $self, $c ) = @_;
 
-    $c->stash->{council_check_action} = 'alert';
-    unless ( $c->forward('/council/load_and_check_councils_and_wards') ) {
+    $c->stash->{area_check_action} = 'alert';
+    unless ( $c->forward('/council/load_and_check_areas_and_wards') ) {
         $c->go('index');
     }
 
     ( $c->stash->{options}, $c->stash->{reported_to_options} ) =
-      $c->cobrand->council_rss_alert_options( $c->stash->{all_councils}, $c );
+      $c->cobrand->council_rss_alert_options( $c->stash->{all_areas}, $c );
 
     return 1;
 }
@@ -434,7 +438,7 @@ sub determine_location : Private {
             $c->detach('choose');
         }
 
-        $c->go('index') if $c->stash->{location_error};
+        $c->go('index');
     }
 
     # truncate the lat,lon for nicer urls
@@ -470,6 +474,7 @@ sub add_recent_photos : Private {
     {
 
         $c->stash->{photos} = $c->cobrand->recent_photos(
+            'alert',
             $num_photos,
             $c->stash->{latitude},
             $c->stash->{longitude},
@@ -477,7 +482,7 @@ sub add_recent_photos : Private {
         );
     }
     else {
-        $c->stash->{photos} = $c->cobrand->recent_photos($num_photos);
+        $c->stash->{photos} = $c->cobrand->recent_photos('alert', $num_photos);
     }
 
     return 1;

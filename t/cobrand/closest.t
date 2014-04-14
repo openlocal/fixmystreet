@@ -5,12 +5,15 @@ use Test::More;
 
 use mySociety::Locale;
 use FixMyStreet::App;
+use FixMyStreet::TestMech;
+
+my $mech = FixMyStreet::TestMech->new;
 
 use_ok 'FixMyStreet::Cobrand';
 
 mySociety::Locale::gettext_domain( 'FixMyStreet' );
 
-my $c = FixMyStreet::Cobrand::Default->new();
+my $c = FixMyStreet::Cobrand::UK->new();
 
 my $user =
   FixMyStreet::App->model('DB::User')
@@ -29,7 +32,7 @@ my $dt = DateTime->new(
 my $report = FixMyStreet::App->model('DB::Problem')->find_or_create(
     {
         postcode           => 'SW1A 1AA',
-        council            => '2504',
+        bodies_str         => '2504',
         areas              => ',105255,11806,11828,2247,2504,',
         category           => 'Other',
         title              => 'Test 2',
@@ -54,25 +57,32 @@ ok $report, "created test report - $report_id";
 
 $report->geocode( undef );
 
-ok !$report->geocode, 'no gecode entry for report';
+ok !$report->geocode, 'no geocode entry for report';
 
 my $near = $c->find_closest( $report->latitude, $report->longitude, $report );
 
-ok $report->geocode, 'geocode entry added to report';
-ok $report->geocode->{resourceSets}, 'geocode entry looks like right sort of thing';
+SKIP: {
+    if (!FixMyStreet->config('BING_MAPS_API_KEY')) {
+        skip 'No Bing Maps key', 0;
+    }
 
-like $near, qr/Constitution Hill/i, 'nearest street looks right';
-like $near, qr/Nearest postcode .*: SW1A 1AA/i, 'nearest postcode looks right';
+    ok $report->geocode, 'geocode entry added to report';
+    ok $report->geocode->{resourceSets}, 'geocode entry looks like right sort of thing';
 
-$near = $c->find_closest_address_for_rss( $report->latitude, $report->longitude, $report );
+    like $near, qr/Constitution Hill/i, 'nearest street looks right';
+    like $near, qr/Nearest postcode .*: SW1A 1AA/i, 'nearest postcode looks right';
 
-like $near, qr/Constitution Hill/i, 'nearest street for RSS looks right';
-unlike $near, qr/Nearest postcode/i, 'no nearest postcode in RSS text';
+    $near = $c->find_closest_address_for_rss( $report->latitude, $report->longitude, $report );
 
-$report->geocode( undef );
-$near = $c->find_closest_address_for_rss( $report->latitude, $report->longitude, $report );
+    like $near, qr/Constitution Hill/i, 'nearest street for RSS looks right';
+    unlike $near, qr/Nearest postcode/i, 'no nearest postcode in RSS text';
 
-ok !$near, 'no closest address for RSS if not cached';
+    $report->geocode( undef );
+    $near = $c->find_closest_address_for_rss( $report->latitude, $report->longitude, $report );
+
+    ok !$near, 'no closest address for RSS if not cached';
+}
 
 # all done
+$mech->delete_user( $user );
 done_testing();

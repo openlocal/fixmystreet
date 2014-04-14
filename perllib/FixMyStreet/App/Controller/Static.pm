@@ -19,13 +19,13 @@ template depending on language, will need extending at some point.
 
 sub about : Global : Args(0) {
     my ( $self, $c ) = @_;
-    # don't need to do anything here - should just pass through.
+
+    my $lang_code = $c->stash->{lang_code};
+    my $template  = "static/about-$lang_code.html";
+    $c->stash->{template} = $template;
 }
 
-sub for_councils : Path('/for-councils') : Args(0) {
-    my ( $self, $c ) = @_;
-}
-sub for_councils_faq : Path('/for-councils/faq') : Args(0) {
+sub privacy : Global : Args(0) {
     my ( $self, $c ) = @_;
 }
 
@@ -54,6 +54,10 @@ sub posters : Global : Args(0) {
 }
 
 sub iphone : Global : Args(0) {
+    my ( $self, $c ) = @_;
+}
+
+sub council : Global : Args(0) {
     my ( $self, $c ) = @_;
 }
 

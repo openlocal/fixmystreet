@@ -3,16 +3,21 @@ use warnings;
 use Test::More;
 
 use FixMyStreet::TestMech;
+use FixMyStreet::App;
 use Web::Scraper;
+
+# disable info logs for this test run
+FixMyStreet::App->log->disable('info');
+END { FixMyStreet::App->log->enable('info'); }
 
 my $mech = FixMyStreet::TestMech->new;
 
-my $open311Conf = FixMyStreet::App->model('DB::Open311Conf')->find_or_create( {
-        area_id => 2651,
-        endpoint => 'http://example.com/open311',
-        jurisdiction => 'mySociety',
-        api_key => 'apikey',
-} );
+my $body = $mech->create_body_ok(2651, 'City of Edinburgh Council');
+$body->update({
+    endpoint => 'http://example.com/open311',
+    jurisdiction => 'mySociety',
+    api_key => 'apikey',
+});
 
 my %contact_params = (
     confirmed => 1,
@@ -24,18 +29,18 @@ my %contact_params = (
 # Let's make some contacts to send things to!
 my $contact1 = FixMyStreet::App->model('DB::Contact')->find_or_create( {
     %contact_params,
-    area_id => 2651, # Edinburgh
+    body_id => 2651, # Edinburgh
     category => 'Street lighting',
     email => '100',
     extra => [ { description => 'Lamppost number', code => 'number', required => 'True' },
                { description => 'Lamppost type', code => 'type', required => 'False', values =>
-                   { value => { Yellow => { key => 'modern' }, 'Gas' => { key => 'old' } } }
+                   { value => [ { name => ['Gas'], key => ['old'] }, { name => [ 'Yellow' ], key => [ 'modern' ] } ] }
                } 
              ],
 } );
 my $contact2 = FixMyStreet::App->model('DB::Contact')->find_or_create( {
     %contact_params,
-    area_id => 2651, # Edinburgh
+    body_id => 2651, # Edinburgh
     category => 'Graffiti Removal',
     email => '101',
 } );
@@ -111,20 +116,25 @@ foreach my $test (
         $mech->get_ok('/around');
 
         # submit initial pc form
-        $mech->submit_form_ok( { with_fields => { pc => $test->{pc} } },
-            "submit location" );
-        is_deeply $mech->form_errors, [], "no errors for pc '$test->{pc}'";
+        FixMyStreet::override_config {
+            ALLOWED_COBRANDS => [ { 'fixmystreet' => '.' } ],
+            MAPIT_URL => 'http://mapit.mysociety.org/',
+        }, sub {
+            $mech->submit_form_ok( { with_fields => { pc => $test->{pc} } },
+                "submit location" );
+            is_deeply $mech->page_errors, [], "no errors for pc '$test->{pc}'";
 
-        # click through to the report page
-        $mech->follow_link_ok( { text => 'skip this step', },
-            "follow 'skip this step' link" );
+            # click through to the report page
+            $mech->follow_link_ok( { text_regex => qr/skip this step/i, },
+                "follow 'skip this step' link" );
 
-        # submit the main form
-        $mech->submit_form_ok( { with_fields => $test->{fields} },
-            "submit form" );
+            # submit the main form
+            $mech->submit_form_ok( { with_fields => $test->{fields} },
+                "submit form" );
+        };
 
         # check that we got the errors expected
-        is_deeply $mech->form_errors, $test->{errors}, "check errors";
+        is_deeply $mech->page_errors, $test->{errors}, "check errors";
 
         # check that fields have changed as expected
         my $new_values = {
@@ -136,7 +146,7 @@ foreach my $test (
 
         if ( $test->{fields}->{category} eq 'Street lighting' ) {
             my $result = scraper {
-                process 'div#category_meta div select#form_type option', 'option[]' => '@value';
+                process 'select#form_type option', 'option[]' => '@value';
             }
             ->scrape( $mech->response );
 
@@ -147,7 +157,12 @@ foreach my $test (
             %{ $test->{fields} },
             %{ $test->{submit_with} },
         };
-        $mech->submit_form_ok( { with_fields => $new_values } );
+        FixMyStreet::override_config {
+            ALLOWED_COBRANDS => [ { 'fixmystreet' => '.' } ],
+            MAPIT_URL => 'http://mapit.mysociety.org/',
+        }, sub {
+            $mech->submit_form_ok( { with_fields => $new_values } );
+        };
 
         $user = FixMyStreet::App->model('DB::User')->find( { email => $test_email } );
         ok $user, 'created user';

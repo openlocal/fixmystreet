@@ -18,8 +18,8 @@ __PACKAGE__->config(
     ENCODING       => 'utf8',
     render_die     => 1,
     expose_methods => [
-        'loc', 'nget', 'tprintf', 'display_crosssell_advert', 'prettify_epoch',
-        'add_links', 'version',
+        'loc', 'nget', 'tprintf', 'display_crosssell_advert', 'prettify_dt',
+        'add_links', 'version', 'decode',
     ],
     FILTERS => {
         escape_js => \&escape_js,
@@ -83,31 +83,29 @@ sub tprintf {
 
     [% display_crosssell_advert( email, name ) %]
 
-Displays a crosssell advert if permitted by the cobrand.
+Displays a crosssell advert (will be fixmystreet cobrand only).
 
 =cut
 
 sub display_crosssell_advert {
     my ( $self, $c, $email, $name, %data ) = @_;
-
-    return unless $c->cobrand->allow_crosssell_adverts();
     return CrossSell::display_advert( $c, $email, $name, %data );
 }
 
-=head2 Utils::prettify_epoch
+=head2 Utils::prettify_dt
 
-    [% pretty = prettify_epoch( $epoch, $short_bool ) %]
+    [% pretty = prettify_dt( $dt, $short_bool ) %]
 
-Return a pretty version of the epoch.
+Return a pretty version of the DateTime object.
 
     $short_bool = 1;     # 16:02, 29 Mar 2011
     $short_bool = 0;     # 16:02, Tuesday 29 March 2011
 
 =cut
 
-sub prettify_epoch {
+sub prettify_dt {
     my ( $self, $c, $epoch, $short_bool ) = @_;
-    return Utils::prettify_epoch( $epoch, $short_bool );
+    return Utils::prettify_dt( $epoch, $short_bool );
 }
 
 =head2 add_links
@@ -123,8 +121,14 @@ sub add_links {
 
     $text =~ s/\r//g;
     $text = ent($text);
-    $text =~ s{(https?://[^\s]+)}{<a href="$1">$1</a>}g;
+    $text =~ s{(https?://)([^\s]+)}{"<a href='$1$2'>$1" . _space_slash($2) . '</a>'}ge;
     return $text;
+}
+
+sub _space_slash {
+    my $t = shift;
+    $t =~ s{/(?!$)}{/ }g;
+    return $t;
 }
 
 =head2 escape_js
@@ -173,7 +177,14 @@ sub version {
         my $path = FixMyStreet->path_to('web', $file);
         $version_hash{$file} = ( stat( $path ) )[9];
     }
+    $version_hash{$file} ||= '';
     return "$file?$version_hash{$file}";
+}
+
+sub decode {
+    my ( $self, $c, $text ) = @_;
+    utf8::decode($text) unless utf8::is_utf8($text);
+    return $text;
 }
 
 1;

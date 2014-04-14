@@ -1,3 +1,4 @@
+use utf8;
 package FixMyStreet::DB::Result::AlertSent;
 
 # Created by DBIx::Class::Schema::Loader
@@ -7,7 +8,6 @@ use strict;
 use warnings;
 
 use base 'DBIx::Class::Core';
-
 __PACKAGE__->load_components("FilterColumn", "InflateColumn::DateTime", "EncodedColumn");
 __PACKAGE__->table("alert_sent");
 __PACKAGE__->add_columns(
@@ -26,12 +26,12 @@ __PACKAGE__->belongs_to(
   "alert",
   "FixMyStreet::DB::Result::Alert",
   { id => "alert_id" },
-  { is_deferrable => 1, on_delete => "CASCADE", on_update => "CASCADE" },
+  { is_deferrable => 0, on_delete => "NO ACTION", on_update => "NO ACTION" },
 );
 
 
-# Created by DBIx::Class::Schema::Loader v0.07010 @ 2011-06-23 15:49:48
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:fTiWIoriQUvHpWc9PpFLvA
+# Created by DBIx::Class::Schema::Loader v0.07035 @ 2013-09-10 17:11:54
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:COwsprqRSNZS1IxJrPYgMQ
 
 
 # You can replace this text with custom code or comments, and it will be preserved on regeneration

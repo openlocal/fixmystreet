@@ -9,23 +9,14 @@ BEGIN {
     FixMyStreet->test_mode(1);
 }
 
-use Test::More tests => 6;
+use Test::More tests => 5;
+
+use Catalyst::Test 'FixMyStreet::App';
 
 use Email::Send::Test;
 use Path::Class;
 
-use_ok 'FixMyStreet::App';
-my $c = FixMyStreet::App->new(
-    {
-        request => Catalyst::Request->new(
-            {
-                base => URI->new('http://fixmystreet.com/'),
-                uri  => URI->new('http://fixmystreet.com/')
-            }
-        ),
-    }
-);
-$c->setup_request();
+my $c = ctx_request("/");
 
 # set some values in the stash
 $c->stash->{foo} = 'bar';
@@ -49,7 +40,7 @@ ok $email_as_string =~ s{\s+Message-ID:\s+\S.*?$}{}xms, "Found and stripped out 
 my $expected_email_content =   file(__FILE__)->dir->file('send_email_sample.txt')->slurp;
 my $name = FixMyStreet->config('CONTACT_NAME');
 $name = "\"$name\"" if $name =~ / /;
-my $sender = $name . ' <' . FixMyStreet->config('CONTACT_EMAIL') . '>';
+my $sender = $name . ' <' . FixMyStreet->config('DO_NOT_REPLY_EMAIL') . '>';
 $expected_email_content =~ s{CONTACT_EMAIL}{$sender};
 
 is $email_as_string,

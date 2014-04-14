@@ -5,8 +5,8 @@ use namespace::autoclean;
 use File::Slurp;
 use List::MoreUtils qw(zip);
 use POSIX qw(strcoll);
+use RABX;
 use mySociety::MaPit;
-use mySociety::VotingArea;
 
 BEGIN { extends 'Catalyst::Controller'; }
 
@@ -31,32 +31,31 @@ Show the summary page of all reports.
 sub index : Path : Args(0) {
     my ( $self, $c ) = @_;
 
-    # Fetch all areas of the types we're interested in
-    my $areas_info;
-    eval {
-        my @area_types = $c->cobrand->area_types;
-        $areas_info = mySociety::MaPit::call('areas', \@area_types,
-            min_generation => $c->cobrand->area_min_generation
+    # Zurich goes straight to map page, with all reports
+    if ( $c->cobrand->moniker eq 'zurich' ) {
+        $c->forward( 'load_and_group_problems' );
+        my $pins = $c->stash->{pins};
+        $c->stash->{page} = 'reports';
+        FixMyStreet::Map::display_map(
+            $c,
+            latitude  => @$pins ? $pins->[0]{latitude} : 0,
+            longitude => @$pins ? $pins->[0]{longitude} : 0,
+            area      => 274456,
+            pins      => $pins,
+            any_zoom  => 1,
         );
-    };
-    if ($@) {
-        $c->stash->{message} = _("Unable to look up areas in MaPit. Please try again later.") . ' ' .
-            sprintf(_('The error was: %s'), $@);
-        $c->stash->{template} = 'errors/generic.html';
+        return 1;
     }
 
-    # For each area, add its link and perhaps alter its name if we need to for
-    # places with the same name.
-    foreach (values %$areas_info) {
-        $_->{url} = $c->uri_for( '/reports/' . $c->cobrand->short_name( $_, $areas_info ) );
-        if ($_->{parent_area} && $_->{url} =~ /,|%2C/) {
-            $_->{name} .= ', ' . $areas_info->{$_->{parent_area}}{name};
-        }
+    if ( my $body = $c->cobrand->all_reports_single_body ) {
+        $c->stash->{body} = $body;
+        $c->detach( 'redirect_body' );
     }
 
-    $c->stash->{areas_info} = $areas_info;
-    my @keys = sort { strcoll($areas_info->{$a}{name}, $areas_info->{$b}{name}) } keys %$areas_info;
-    $c->stash->{areas_info_sorted} = [ map { $areas_info->{$_} } @keys ];
+    # Fetch all areas of the types we're interested in
+    my @bodies = $c->model('DB::Body')->all;
+    @bodies = sort { strcoll($a->name, $b->name) } @bodies;
+    $c->stash->{bodies} = \@bodies;
 
     eval {
         my $data = File::Slurp::read_file(
@@ -67,9 +66,13 @@ sub index : Path : Args(0) {
         $c->stash->{open} = $j->{open};
     };
     if ($@) {
-        $c->stash->{message} = _("There was a problem showing the All Reports page. Please try again later.") . ' ' .
-            sprintf(_('The error was: %s'), $@);
+        $c->stash->{message} = _("There was a problem showing the All Reports page. Please try again later.");
+        if ($c->config->{STAGING_SITE}) {
+            $c->stash->{message} .= '</p><p>Perhaps the bin/update-all-reports script needs running. Use: bin/cron-wrapper bin/update-all-reports</p><p>'
+                . sprintf(_('The error was: %s'), $@);
+        }
         $c->stash->{template} = 'errors/generic.html';
+        return;
     }
 
     # Down here so that error pages aren't cached.
@@ -78,13 +81,13 @@ sub index : Path : Args(0) {
 
 =head2 index
 
-Show the summary page for a particular council.
+Show the summary page for a particular body.
 
 =cut
 
-sub council : Path : Args(1) {
-    my ( $self, $c, $council ) = @_;
-    $c->detach( 'ward', [ $council ] );
+sub body : Path : Args(1) {
+    my ( $self, $c, $body ) = @_;
+    $c->detach( 'ward', [ $body ] );
 }
 
 =head2 index
@@ -94,169 +97,222 @@ Show the summary page for a particular ward.
 =cut
 
 sub ward : Path : Args(2) {
-    my ( $self, $c, $council, $ward ) = @_;
+    my ( $self, $c, $body, $ward ) = @_;
 
-    $c->forward( 'council_check', [ $council ] );
+    $c->forward( 'body_check', [ $body ] );
     $c->forward( 'ward_check', [ $ward ] )
         if $ward;
-    $c->forward( 'load_parent' );
-    $c->forward( 'check_canonical_url', [ $council ] );
+    $c->forward( 'check_canonical_url', [ $body ] );
     $c->forward( 'load_and_group_problems' );
 
-    my $council_short = $c->cobrand->short_name( $c->stash->{council}, $c->stash->{areas_info} );
-    $c->stash->{rss_url} = '/rss/reports/' . $council_short;
+    my $body_short = $c->cobrand->short_name( $c->stash->{body} );
+    $c->stash->{rss_url} = '/rss/reports/' . $body_short;
     $c->stash->{rss_url} .= '/' . $c->cobrand->short_name( $c->stash->{ward} )
         if $c->stash->{ward};
 
-    $c->stash->{council_url} = '/reports/' . $council_short;
+    $c->stash->{body_url} = '/reports/' . $body_short;
 
     $c->stash->{stats} = $c->cobrand->get_report_stats();
 
     my $pins = $c->stash->{pins};
 
     $c->stash->{page} = 'reports'; # So the map knows to make clickable pins
-    FixMyStreet::Map::display_map(
-        $c,
+    my %map_params = (
         latitude  => @$pins ? $pins->[0]{latitude} : 0,
         longitude => @$pins ? $pins->[0]{longitude} : 0,
-        area      => $c->stash->{ward} ? $c->stash->{ward}->{id} : $c->stash->{council}->{id},
-        pins      => $pins,
+        area      => $c->stash->{ward} ? $c->stash->{ward}->{id} : [ keys %{$c->stash->{body}->areas} ],
         any_zoom  => 1,
     );
+    if ( $c->cobrand->moniker eq 'emptyhomes' ) {
+        FixMyStreet::Map::display_map(
+            $c, %map_params, latitude => 0, longitude => 0,
+        );
+    } else {
+        FixMyStreet::Map::display_map(
+            $c, %map_params, pins => $pins,
+        );
+    }
+
+    $c->cobrand->tweak_all_reports_map( $c );
 
     # List of wards
-    unless ($c->stash->{ward}) {
-        my $children = mySociety::MaPit::call('area/children', $c->stash->{council}->{id},
-            type => $mySociety::VotingArea::council_child_types,
+    if ( !$c->stash->{ward} && $c->stash->{body}->id && $c->stash->{body}->body_areas->first ) {
+        my $children = mySociety::MaPit::call('area/children', [ $c->stash->{body}->body_areas->first->area_id ],
+            type => $c->cobrand->area_types_children,
         );
-        foreach (values %$children) {
-            $_->{url} = $c->uri_for( $c->stash->{council_url}
-                . '/' . $c->cobrand->short_name( $_ )
-            );
+        unless ($children->{error}) {
+            foreach (values %$children) {
+                $_->{url} = $c->uri_for( $c->stash->{body_url}
+                    . '/' . $c->cobrand->short_name( $_ )
+                );
+            }
+            $c->stash->{children} = $children;
         }
-        $c->stash->{children} = $children;
     }
 }
 
-sub rss_council : Regex('^rss/(reports|area)$') : Args(1) {
-    my ( $self, $c, $council ) = @_;
-    $c->detach( 'rss_ward', [ $council ] );
+sub rss_area : Path('/rss/area') : Args(1) {
+    my ( $self, $c, $area ) = @_;
+    $c->detach( 'rss_area_ward', [ $area ] );
 }
 
-sub rss_ward : Regex('^rss/(reports|area)$') : Args(2) {
-    my ( $self, $c, $council, $ward ) = @_;
-
-    my ( $rss ) = $c->req->captures->[0];
+sub rss_area_ward : Path('/rss/area') : Args(2) {
+    my ( $self, $c, $area, $ward ) = @_;
 
     $c->stash->{rss} = 1;
 
-    $c->forward( 'council_check', [ $council ] );
-    $c->forward( 'ward_check',    [ $ward    ] ) if $ward;
+    # area_check
 
-    if ($rss eq 'area' && $c->stash->{council}{type} ne 'DIS' && $c->stash->{council}{type} ne 'CTY') {
-        # Two possibilites are the same for one-tier councils, so redirect one to the other
-        $c->detach( 'redirect_area' );
+    $area =~ s/\+/ /g;
+    $area =~ s/\.html//;
+
+    # XXX Currently body/area overlaps here are a bit muddy.
+    # We're checking an area here, but this function is currently doing that.
+    return if $c->cobrand->reports_body_check( $c, $area );
+
+    # If we're passed an ID number (don't think this is used anywhere, it
+    # certainly shouldn't be), just look that up on mapit and redirect
+    if ($area =~ /^\d+$/) {
+        my $council = mySociety::MaPit::call('area', $area);
+        $c->detach( 'redirect_index') if $council->{error};
+        $c->stash->{body} = $council;
+        $c->detach( 'redirect_body' );
     }
 
-    my $url =       $c->cobrand->short_name( $c->stash->{council} );
-    $url   .= '/' . $c->cobrand->short_name( $c->stash->{ward}    ) if $c->stash->{ward};
+    # We must now have a string to check on mapit
+    my $areas = mySociety::MaPit::call( 'areas', $area,
+        type => $c->cobrand->area_types,
+    );
+
+    if (keys %$areas == 1) {
+        ($c->stash->{area}) = values %$areas;
+    } else {
+        foreach (keys %$areas) {
+            if (lc($areas->{$_}->{name}) eq lc($area) || $areas->{$_}->{name} =~ /^\Q$area\E (Borough|City|District|County) Council$/i) {
+                $c->stash->{area} = $areas->{$_};
+            }
+        }
+    }
+
+    $c->detach( 'redirect_index' ) unless $c->stash->{area};
+
+    $c->forward( 'ward_check', [ $ward ] ) if $ward;
+
+    my $url = $c->cobrand->short_name( $c->stash->{area} );
+    $url .= '/' . $c->cobrand->short_name( $c->stash->{ward} ) if $c->stash->{ward};
     $c->stash->{qs} = "/$url";
 
-    my @params;
-    push @params, $c->stash->{council}->{id} if $rss eq 'reports';
-    push @params, $c->stash->{ward}
-        ? $c->stash->{ward}->{id}
-        : $c->stash->{council}->{id};
-    $c->stash->{db_params} = [ @params ];
+    if ($c->stash->{area}{type} ne 'DIS' && $c->stash->{area}{type} ne 'CTY') {
+        # UK-specific types - two possibilites are the same for one-tier councils, so redirect one to the other
+        # With bodies, this should presumably redirect if only one body covers
+        # the area, and then it will need that body's name (rather than
+        # assuming as now it is the same as the area)
+        $c->stash->{body} = $c->stash->{area};
+        $c->detach( 'redirect_body' );
+    }
 
-    if ( $rss eq 'area' && $c->stash->{ward} ) {
+    $c->stash->{type} = 'area_problems';
+    if ( $c->stash->{ward} ) {
         # All problems within a particular ward
-        $c->stash->{type}         = 'area_problems';
         $c->stash->{title_params} = { NAME => $c->stash->{ward}{name} };
         $c->stash->{db_params}    = [ $c->stash->{ward}->{id} ];
-    } elsif ( $rss eq 'area' ) {
-        # Problems within a particular council
-        $c->stash->{type}         = 'area_problems';
-        $c->stash->{title_params} = { NAME => $c->stash->{council}{name} };
-        $c->stash->{db_params}    = [ $c->stash->{council}->{id} ];
-    } elsif ($c->stash->{ward}) {
+    } else {
+        # Problems within a particular area
+        $c->stash->{title_params} = { NAME => $c->stash->{area}->{name} };
+        $c->stash->{db_params}    = [ $c->stash->{area}->{id} ];
+    }
+
+    # Send on to the RSS generation
+    $c->forward( '/rss/output' );
+
+}
+
+sub rss_body : Path('/rss/reports') : Args(1) {
+    my ( $self, $c, $body ) = @_;
+    $c->detach( 'rss_ward', [ $body ] );
+}
+
+sub rss_ward : Path('/rss/reports') : Args(2) {
+    my ( $self, $c, $body, $ward ) = @_;
+
+    $c->stash->{rss} = 1;
+
+    $c->forward( 'body_check', [ $body ] );
+    $c->forward( 'ward_check', [ $ward ] ) if $ward;
+
+    my $url =       $c->cobrand->short_name( $c->stash->{body} );
+    $url   .= '/' . $c->cobrand->short_name( $c->stash->{ward} ) if $c->stash->{ward};
+    $c->stash->{qs} = "/$url";
+
+    if ($c->stash->{ward}) {
         # Problems sent to a council, restricted to a ward
         $c->stash->{type} = 'ward_problems';
-        $c->stash->{title_params} = { COUNCIL => $c->stash->{council}{name}, WARD => $c->stash->{ward}{name} };
-        $c->stash->{db_params} = [ $c->stash->{council}->{id}, $c->stash->{ward}->{id} ];
+        $c->stash->{title_params} = { COUNCIL => $c->stash->{body}->name, WARD => $c->stash->{ward}{name} };
+        $c->stash->{db_params} = [ $c->stash->{body}->id, $c->stash->{ward}->{id} ];
     } else {
         # Problems sent to a council
         $c->stash->{type} = 'council_problems';
-        $c->stash->{title_params} = { COUNCIL => $c->stash->{council}{name} };
-        $c->stash->{db_params} = [ $c->stash->{council}->{id}, $c->stash->{council}->{id} ];
+        $c->stash->{title_params} = { COUNCIL => $c->stash->{body}->name };
+        # XXX This looks up in both bodies_str and areas, but is only using body ID.
+        # This will not work properly in any install where body IDs are not === area IDs.
+        $c->stash->{db_params} = [ $c->stash->{body}->id, $c->stash->{body}->id ];
     }
 
     # Send on to the RSS generation
     $c->forward( '/rss/output' );
 }
 
-=head2 council_check
+=head2 body_check
 
-This action checks the council name (or code) given in a URI exists, is valid
-and so on. If it is, it stores the Area in the stash, otherwise it redirects
-to the all reports page.
+This action checks the body name (or code) given in a URI exists, is valid and
+so on. If it is, it stores the body in the stash, otherwise it redirects to the
+all reports page.
 
 =cut
 
-sub council_check : Private {
-    my ( $self, $c, $q_council ) = @_;
+sub body_check : Private {
+    my ( $self, $c, $q_body ) = @_;
 
-    $q_council =~ s/\+/ /g;
-    $q_council =~ s/\.html//;
-
-    # Manual misspelling redirect
-    if ($q_council =~ /^rhondda cynon taff$/i) {
-        my $url = $c->uri_for( '/reports/rhondda+cynon+taf' );
-        $c->res->redirect( $url );
-        $c->detach();
-    }
+    $q_body =~ s/\+/ /g;
+    $q_body =~ s/\.html//;
 
     # Check cobrand specific incantations - e.g. ONS codes for UK,
     # Oslo/ kommunes sharing a name in Norway
-    return if $c->cobrand->reports_council_check( $c, $q_council );
+    return if $c->cobrand->reports_body_check( $c, $q_body );
 
     # If we're passed an ID number (don't think this is used anywhere, it
     # certainly shouldn't be), just look that up on MaPit and redirect
-    if ($q_council =~ /^\d+$/) {
-        my $council = mySociety::MaPit::call('area', $q_council);
-        $c->detach( 'redirect_index') if $council->{error};
-        $c->stash->{council} = $council;
-        $c->detach( 'redirect_area' );
+    if ($q_body =~ /^\d+$/) {
+        my $area = mySociety::MaPit::call('area', $q_body);
+        $c->detach( 'redirect_index') if $area->{error};
+        $c->stash->{body} = $area;
+        $c->detach( 'redirect_body' );
     }
 
     # We must now have a string to check
-    my @area_types = $c->cobrand->area_types;
-    my $areas = mySociety::MaPit::call( 'areas', $q_council,
-        type => \@area_types,
-        min_generation => $c->cobrand->area_min_generation
-    );
-    if (keys %$areas == 1) {
-        ($c->stash->{council}) = values %$areas;
+    my @bodies = $c->model('DB::Body')->search( { name => { -like => "$q_body%" } } )->all;
+
+    if (@bodies == 1) {
+        $c->stash->{body} = $bodies[0];
         return;
     } else {
-        foreach (keys %$areas) {
-            if (lc($areas->{$_}->{name}) eq lc($q_council) || $areas->{$_}->{name} =~ /^\Q$q_council\E (Borough|City|District|County) Council$/i) {
-                $c->stash->{council} = $areas->{$_};
+        foreach (@bodies) {
+            if (lc($_->name) eq lc($q_body) || $_->name =~ /^\Q$q_body\E (Borough|City|District|County) Council$/i) {
+                $c->stash->{body} = $_;
                 return;
             }
         }
     }
 
-    # No result, bad council name.
+    # No result, bad body name.
     $c->detach( 'redirect_index' );
 }
 
 =head2 ward_check
 
 This action checks the ward name from a URI exists and is part of the right
-parent, already found with council_check. It either stores the ward Area if
-okay, or redirects to the council page if bad.
-This is currently only used in the UK, hence the use of mySociety::VotingArea.
+parent, already found with body_check. It either stores the ward Area if
+okay, or redirects to the body page if bad.
 
 =cut
 
@@ -267,48 +323,45 @@ sub ward_check : Private {
     $ward =~ s/\.html//;
     $ward =~ s{_}{/}g;
 
-    my $council = $c->stash->{council};
+    # Could be from RSS area, or body...
+    my $parent_id;
+    if ( $c->stash->{body} ) {
+        $parent_id = $c->stash->{body}->body_areas->first;
+        $c->detach( 'redirect_body' ) unless $parent_id;
+        $parent_id = $parent_id->area_id;
+    } else {
+        $parent_id = $c->stash->{area}->{id};
+    }
 
     my $qw = mySociety::MaPit::call('areas', $ward,
-        type => $mySociety::VotingArea::council_child_types,
-        min_generation => $c->cobrand->area_min_generation
+        type => $c->cobrand->area_types_children,
     );
     foreach my $area (sort { $a->{name} cmp $b->{name} } values %$qw) {
-        if ($area->{parent_area} == $council->{id}) {
+        if ($area->{parent_area} == $parent_id) {
             $c->stash->{ward} = $area;
             return;
         }
     }
     # Given a false ward name
-    $c->detach( 'redirect_area' );
-}
-
-sub load_parent : Private {
-    my ( $self, $c ) = @_;
-
-    my $council = $c->stash->{council};
-    my $areas_info;
-    if ($council->{parent_area}) {
-        $c->stash->{areas_info} = mySociety::MaPit::call('areas', [ $council->{id}, $council->{parent_area} ])
-    } else {
-        $c->stash->{areas_info} = { $council->{id} => $council };
-    }
+    $c->stash->{body} = $c->stash->{area}
+        unless $c->stash->{body};
+    $c->detach( 'redirect_body' );
 }
 
 =head2 check_canonical_url
 
-Given an already found (case-insensitively) council, check what URL
+Given an already found (case-insensitively) body, check what URL
 we are at and redirect accordingly if different.
 
 =cut
 
 sub check_canonical_url : Private {
-    my ( $self, $c, $q_council ) = @_;
+    my ( $self, $c, $q_body ) = @_;
 
-    my $council_short = $c->cobrand->short_name( $c->stash->{council}, $c->stash->{areas_info} );
-    my $url_short = URI::Escape::uri_escape_utf8($q_council);
+    my $body_short = $c->cobrand->short_name( $c->stash->{body} );
+    my $url_short = URI::Escape::uri_escape_utf8($q_body);
     $url_short =~ s/%2B/+/g;
-    $c->detach( 'redirect_area' ) unless $council_short eq $url_short;
+    $c->detach( 'redirect_body' ) unless $body_short eq $url_short;
 }
 
 sub load_and_group_problems : Private {
@@ -317,65 +370,59 @@ sub load_and_group_problems : Private {
     my $page = $c->req->params->{p} || 1;
 
     my $where = {
-        state => [ FixMyStreet::DB::Result::Problem->visible_states() ]
+        non_public => 0,
+        state      => [ FixMyStreet::DB::Result::Problem->visible_states() ]
     };
     if ($c->stash->{ward}) {
         $where->{areas} = { 'like', '%,' . $c->stash->{ward}->{id} . ',%' };
-        $where->{council} = [
+        $where->{bodies_str} = [
             undef,
-            $c->stash->{council}->{id},
-            { 'like', $c->stash->{council}->{id} . ',%' },
-            { 'like', '%,' . $c->stash->{council}->{id} },
+            $c->stash->{body}->id,
+            { 'like', $c->stash->{body}->id . ',%' },
+            { 'like', '%,' . $c->stash->{body}->id },
         ];
-    } elsif ($c->stash->{council}) {
-        $where->{areas} = { 'like', '%,' . $c->stash->{council}->{id} . ',%' };
-        $where->{council} = [
-            undef,
-            $c->stash->{council}->{id},
-            { 'like', $c->stash->{council}->{id} . ',%' },
-            { 'like', '%,' . $c->stash->{council}->{id} },
+    } elsif ($c->stash->{body}) {
+        # XXX FixMyStreet used to have the following line so that reports not
+        # currently sent anywhere could still be listed in the appropriate
+        # (body/area), as they were the same.  Now they're not, not sure if
+        # there's a way to do this easily.
+        #$where->{areas} = { 'like', '%,' . $c->stash->{body}->id . ',%' };
+        $where->{bodies_str} = [
+        #    undef,
+            $c->stash->{body}->id,
+            { 'like', $c->stash->{body}->id . ',%' },
+            { 'like', '%,' . $c->stash->{body}->id },
         ];
     }
     my $problems = $c->cobrand->problems->search(
         $where,
         {
-            columns => [
-                'id', 'council', 'state', 'areas', 'latitude', 'longitude', 'title', 'cobrand',
-                #{ duration => { extract => "epoch from current_timestamp-lastupdate" } },
-                #{ age      => { extract => "epoch from current_timestamp-confirmed"  } },
-                { confirmed  => { extract => 'epoch from confirmed' } },
-                { whensent   => { extract => 'epoch from whensent' } },
-                { lastupdate => { extract => 'epoch from lastupdate' } },
-                { photo    => 'photo is not null' },
-            ],
             order_by => { -desc => 'lastupdate' },
-            rows => 100,
+            rows => $c->cobrand->reports_per_page,
         }
     )->page( $page );
     $c->stash->{pager} = $problems->pager;
-    $problems = $problems->cursor; # Raw DB cursor for speed
 
     my ( %problems, @pins );
-    my $re_councils = join('|', keys %{$c->stash->{areas_info}});
-    my @cols = ( 'id', 'council', 'state', 'areas', 'latitude', 'longitude', 'title', 'cobrand', 'confirmed', 'whensent', 'lastupdate', 'photo' );
-    while ( my @problem = $problems->next ) {
-        my %problem = zip @cols, @problem;
-        $problem{is_fixed} = FixMyStreet::DB::Result::Problem->fixed_states()->{$problem{state}};
-        $c->log->debug( $problem{'cobrand'} . ', cobrand is ' . $c->cobrand->moniker );
-        if ( !$problem{council} ) {
-            # Problem was not sent to any council, add to possible councils
-            $problem{councils} = 0;
-            while ($problem{areas} =~ /,($re_councils)(?=,)/g) {
-                add_row( \%problem, $1, \%problems, \@pins );
+    while ( my $problem = $problems->next ) {
+        $c->log->debug( $problem->cobrand . ', cobrand is ' . $c->cobrand->moniker );
+        if ( !$c->stash->{body} ) {
+            add_row( $c, $problem, 0, \%problems, \@pins );
+            next;
+        }
+        if ( !$problem->bodies_str ) {
+            # Problem was not sent to any body, add to all possible areas XXX
+            my $a = $problem->areas; # Store, as otherwise is looked up every iteration.
+            while ($a =~ /,(\d+)(?=,)/g) {
+                add_row( $c, $problem, $1, \%problems, \@pins );
             }
         } else {
-            # Add to councils it was sent to
-            (my $council = $problem{council}) =~ s/\|.*$//;
-            my @council = split( /,/, $council );
-            $problem{councils} = scalar @council;
-            foreach ( @council ) {
-                next if $c->stash->{council} && $_ != $c->stash->{council}->{id};
-                add_row( \%problem, $_, \%problems, \@pins );
+            # Add to bodies it was sent to
+            # XXX Assumes body ID matches "council ID"
+            my $bodies = $problem->bodies_str_ids;
+            foreach ( @$bodies ) {
+                next if $_ != $c->stash->{body}->id;
+                add_row( $c, $problem, $_, \%problems, \@pins );
             }
         }
     }
@@ -394,26 +441,26 @@ sub redirect_index : Private {
     $c->res->redirect( $c->uri_for($url) );
 }
 
-sub redirect_area : Private {
+sub redirect_body : Private {
     my ( $self, $c ) = @_;
     my $url = '';
     $url   .= "/rss" if $c->stash->{rss};
     $url   .= '/reports';
-    $url   .= '/' . $c->cobrand->short_name( $c->stash->{council}, $c->stash->{areas_info} );
+    $url   .= '/' . $c->cobrand->short_name( $c->stash->{body} );
     $url   .= '/' . $c->cobrand->short_name( $c->stash->{ward} )
         if $c->stash->{ward};
     $c->res->redirect( $c->uri_for($url) );
 }
 
 sub add_row {
-    my ( $problem, $council, $problems, $pins ) = @_;
-    push @{$problems->{$council}}, $problem;
+    my ( $c, $problem, $body, $problems, $pins ) = @_;
+    push @{$problems->{$body}}, $problem;
     push @$pins, {
-        latitude  => $problem->{latitude},
-        longitude => $problem->{longitude},
-        colour    => 'yellow', # FixMyStreet::DB::Result::Problem->fixed_states()->{$problem->{state}} ? 'green' : 'red',
-        id        => $problem->{id},
-        title     => $problem->{title},
+        latitude  => $problem->latitude,
+        longitude => $problem->longitude,
+        colour    => $c->cobrand->pin_colour( $problem, 'reports' ),
+        id        => $problem->id,
+        title     => $problem->title_safe,
     };
 }
 

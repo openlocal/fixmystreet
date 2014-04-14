@@ -87,8 +87,8 @@ sub log_in_ok {
 
     my $user = $mech->create_user_ok($email);
 
-    # store the old password and then change it
-    my $old_password = $user->password;
+    # remember the old password and then change it to a known one
+    my $old_password = $user->password || '';
     $user->update( { password => 'secret' } );
 
     # log in
@@ -99,7 +99,19 @@ sub log_in_ok {
     $mech->logged_in_ok;
 
     # restore the password (if there was one)
-    $user->update( { password => $old_password } ) if $old_password;
+    if ($old_password) {
+
+        # Use store_column and then make_column_dirty to bypass the filters that
+        # would hash the password, otherwise the password required ito log in
+        # would be the hash of the previous one.
+        $user->store_column("password", $old_password);
+        $user->make_column_dirty("password");
+        $user->update();
+
+        # Belt and braces, check that the password has been correctly saved.
+        die "password not correctly restored after log_in_ok"
+            if $user->password ne $old_password;
+    }
 
     return $user;
 }
@@ -151,7 +163,7 @@ sub delete_user {
         ok( $p->delete, "delete problem " . $p->title );
     }
     for my $a ( $user->alerts ) {
-        $a->alert_sents->delete;
+        $a->alerts_sent->delete;
         ok( $a->delete, "delete alert " . $a->alert_type );
     }
     ok( $_->delete, "delete comment " . $_->text )     for $user->comments;
@@ -211,25 +223,6 @@ sub get_email {
     return $emails[0];
 }
 
-=head2 form_errors
-
-    my $arrayref = $mech->form_errors;
-
-Find all the form errors on the current page and return them in page order as an
-arrayref of TEXTs. If none found return empty arrayref.
-
-=cut
-
-sub form_errors {
-    my $mech   = shift;
-    my $result = scraper {
-        process 'div.form-error', 'errors[]', 'TEXT';
-        process 'p.form-error', 'errors[]', 'TEXT';
-    }
-    ->scrape( $mech->response );
-    return $result->{errors} || [];
-}
-
 =head2 page_errors
 
     my $arrayref = $mech->page_errors;
@@ -242,8 +235,7 @@ arrayref of TEXTs. If none found return empty arrayref.
 sub page_errors {
     my $mech   = shift;
     my $result = scraper {
-        process 'p.error',  'errors[]', 'TEXT';
-        process 'ul.error li', 'errors[]', 'TEXT';
+        process 'div.form-error, p.form-error, p.error, ul.error li', 'errors[]', 'TEXT';
     }
     ->scrape( $mech->response );
     return $result->{errors} || [];
@@ -263,7 +255,7 @@ sub import_errors {
     my @errors =    #
       grep { $_ }   #
       map { s{^ERROR:\s*(.*)$}{$1}g ? $_ : undef; }    #
-      split m/\n+/, $mech->response->content;
+      split m/\n+/, $mech->content;
     return \@errors;
 }
 
@@ -316,7 +308,7 @@ sub extract_location {
 
     $meta = $mech->extract_problem_meta;
 
-Returns the problem meta information ( submitted by, at etc ) from a 
+Returns the problem meta information ( submitted by, at etc ) from a
 problem report page
 
 =cut
@@ -326,6 +318,7 @@ sub extract_problem_meta {
 
     my $result = scraper {
         process 'div#side p em', 'meta', 'TEXT';
+        process '.problem-header p em', 'meta', 'TEXT';
     }
     ->scrape( $mech->response );
 
@@ -347,6 +340,7 @@ sub extract_problem_title {
 
     my $result = scraper {
         process 'div#side h1', 'title', 'TEXT';
+        process '.problem-header h1', 'title', 'TEXT';
     }
     ->scrape( $mech->response );
 
@@ -387,12 +381,56 @@ sub extract_update_metas {
 
     my $result = scraper {
         process 'div#updates div.problem-update p em', 'meta[]', 'TEXT';
+        process '.update-text .meta-2', 'meta[]', 'TEXT';
     }
     ->scrape( $mech->response );
 
     my @metas = map { s/^\s+//; s/\s+$//; $_; } @{ $result->{meta} };
 
     return \@metas;
+}
+
+=head2 extract_problem_list
+
+    $problems = $mech->extract_problem_list
+
+Returns an array ref of all problem titles on a page featuring standard issue lists
+
+=cut
+
+sub extract_problem_list {
+    my $mech = shift;
+
+    my $result = scraper {
+        process 'ul.issue-list-a li a h4', 'problems[]', 'TEXT';
+    }->scrape( $mech->response );
+
+    return $result->{ problems } || [];
+}
+
+=head2 extract_report_stats
+
+    $stats = $mech->extract_report_stats
+
+Returns a hash ref keyed by council name of all the council stats from the all reports
+page. Each value is an array ref with the first element being the council name and the
+rest being the stats in the order the appear in each row.
+
+=cut
+
+sub extract_report_stats {
+    my $mech = shift;
+
+    my $result = scraper {
+        process 'tr[align=center]', 'councils[]' => scraper {
+            process 'td.title a', 'council', 'TEXT',
+            process 'td', 'stats[]', 'TEXT'
+        }
+    }->scrape( $mech->response );
+
+    my %councils = map { $_->{council} => $_->{stats} } @{ $result->{councils} };
+
+    return \%councils;
 }
 
 =head2 visible_form_values
@@ -434,6 +472,7 @@ sub visible_form_values {
       grep { ref($_) ne 'HTML::Form::SubmitInput' }
       grep { ref($_) ne 'HTML::Form::ImageInput' }
       grep { ref($_) ne 'HTML::Form::TextInput' || $_->type ne 'hidden' }
+      grep { !$_->disabled }
       $form->inputs;
 
     my @visible_field_names = map { $_->name } @visible_fields;
@@ -490,6 +529,87 @@ sub get_ok_json {
       unless $res->header('Content-Type') =~ m{^application/json\b};
 
     return decode_json( $res->content );
+}
+
+sub delete_problems_for_body {
+    my $mech = shift;
+    my $body = shift;
+
+    my $reports = FixMyStreet::App->model('DB::Problem')->search( { bodies_str => $body } );
+    if ( $reports ) {
+        for my $r ( $reports->all ) {
+            $r->comments->delete;
+        }
+        $reports->delete;
+    }
+}
+
+sub create_body_ok {
+    my $self = shift;
+    my ( $id, $name ) = @_;
+
+    my $params = { id => $id, name => $name };
+    my $body = FixMyStreet::App->model('DB::Body')->find_or_create($params);
+    $body->update($params); # Make sure
+    ok $body, "found/created user for $id $name";
+
+    FixMyStreet::App->model('DB::BodyArea')->find_or_create({
+        area_id => $id,
+        body_id => $id,
+    });
+
+    return $body;
+
+}
+
+sub create_problems_for_body {
+    my ( $mech, $count, $body, $title, $params ) = @_;
+
+    my $dt = $params->{dt} || DateTime->now();
+
+    my $user = $params->{user} ||
+      FixMyStreet::App->model('DB::User')
+      ->find_or_create( { email => 'test@example.com', name => 'Test User' } );
+
+    delete $params->{user};
+    delete $params->{dt};
+
+    my @problems;
+
+    while ($count) {
+        my $default_params = {
+            postcode           => 'SW1A 1AA',
+            bodies_str         => $body,
+            areas              => ',105255,11806,11828,2247,2504,',
+            category           => 'Other',
+            title              => "$title Test $count for $body",
+            detail             => "$title Test $count for $body Detail",
+            used_map           => 't',
+            name               => 'Test User',
+            anonymous          => 'f',
+            state              => 'confirmed',
+            confirmed          => $dt->ymd . ' ' . $dt->hms,
+            lang               => 'en-gb',
+            service            => '',
+            cobrand            => 'default',
+            cobrand_data       => '',
+            send_questionnaire => 't',
+            latitude           => '51.5016605453401',
+            longitude          => '-0.142497580865087',
+            user_id            => $user->id,
+            photo              => 1,
+        };
+
+        my %report_params = ( %$default_params, %$params );
+
+        my $problem =
+          FixMyStreet::App->model('DB::Problem')->create( \%report_params );
+
+        push @problems, $problem;
+        $count--;
+    }
+
+    return @problems;
 }
 
 1;

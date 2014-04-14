@@ -1,3 +1,4 @@
+use utf8;
 package FixMyStreet::DB::Result::User;
 
 # Created by DBIx::Class::Schema::Loader
@@ -7,7 +8,6 @@ use strict;
 use warnings;
 
 use base 'DBIx::Class::Core';
-
 __PACKAGE__->load_components("FilterColumn", "InflateColumn::DateTime", "EncodedColumn");
 __PACKAGE__->table("users");
 __PACKAGE__->add_columns(
@@ -26,10 +26,12 @@ __PACKAGE__->add_columns(
   { data_type => "text", is_nullable => 1 },
   "password",
   { data_type => "text", default_value => "", is_nullable => 0 },
-  "from_council",
-  { data_type => "integer", is_nullable => 1 },
+  "from_body",
+  { data_type => "integer", is_foreign_key => 1, is_nullable => 1 },
   "flagged",
   { data_type => "boolean", default_value => \"false", is_nullable => 0 },
+  "title",
+  { data_type => "text", is_nullable => 1 },
 );
 __PACKAGE__->set_primary_key("id");
 __PACKAGE__->add_unique_constraint("users_email_key", ["email"]);
@@ -40,10 +42,27 @@ __PACKAGE__->has_many(
   { cascade_copy => 0, cascade_delete => 0 },
 );
 __PACKAGE__->has_many(
+  "bodies",
+  "FixMyStreet::DB::Result::Body",
+  { "foreign.comment_user_id" => "self.id" },
+  { cascade_copy => 0, cascade_delete => 0 },
+);
+__PACKAGE__->has_many(
   "comments",
   "FixMyStreet::DB::Result::Comment",
   { "foreign.user_id" => "self.id" },
   { cascade_copy => 0, cascade_delete => 0 },
+);
+__PACKAGE__->belongs_to(
+  "from_body",
+  "FixMyStreet::DB::Result::Body",
+  { id => "from_body" },
+  {
+    is_deferrable => 0,
+    join_type     => "LEFT",
+    on_delete     => "NO ACTION",
+    on_update     => "NO ACTION",
+  },
 );
 __PACKAGE__->has_many(
   "problems",
@@ -53,8 +72,8 @@ __PACKAGE__->has_many(
 );
 
 
-# Created by DBIx::Class::Schema::Loader v0.07010 @ 2011-06-27 10:25:21
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:9IHuqRTcHZCqJeBAaiQxzw
+# Created by DBIx::Class::Schema::Loader v0.07035 @ 2013-09-10 17:11:54
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:jRAtXRLRNozCmthAg9p0dA
 
 __PACKAGE__->add_columns(
     "password" => {
@@ -136,40 +155,47 @@ sub alert_for_problem {
     } );
 }
 
-sub council {
+sub body {
     my $self = shift;
-
-    return '' unless $self->from_council;
-
-    my $key = 'council_name:' . $self->from_council;
-    my $result = Memcached::get($key);
-
-    unless ($result) {
-        my $area_info = mySociety::MaPit::call('area', $self->from_council);
-        $result = $area_info->{name};
-        Memcached::set($key, $result, 86400);
-    }
-
-    return $result;
+    return '' unless $self->from_body;
+    return $self->from_body->name;
 }
 
-=head2 belongs_to_council
+=head2 belongs_to_body
 
-    $belongs_to_council = $user->belongs_to_council( $council_list );
+    $belongs_to_body = $user->belongs_to_body( $bodies );
 
-Returns true if the user belongs to the comma seperated list of council ids passed in
+Returns true if the user belongs to the comma seperated list of body ids passed in
 
 =cut
 
-sub belongs_to_council {
+sub belongs_to_body {
     my $self = shift;
-    my $council = shift;
+    my $bodies = shift;
 
-    my %councils = map { $_ => 1 } split ',', $council;
+    my %bodies = map { $_ => 1 } split ',', $bodies;
 
-    return 1 if $self->from_council && $councils{ $self->from_council };
+    return 1 if $self->from_body && $bodies{ $self->from_body->id };
 
     return 0;
+}
+
+=head2 split_name
+
+    $name = $user->split_name;
+    printf( 'Welcome %s %s', $name->{first}, $name->{last} );
+
+Returns a hashref with first and last keys with first name(s) and last name.
+NB: the spliting algorithm is extremely basic.
+
+=cut
+
+sub split_name {
+    my $self = shift;
+
+    my ($first, $last) = $self->name =~ /^(\S*)(?: (.*))?$/;
+
+    return { first => $first || '', last => $last || '' };
 }
 
 1;

@@ -23,7 +23,7 @@ sub report_update : Path : Args(0) {
     $c->forward( '/report/load_problem_or_display_error', [ $c->req->param('id') ] );
     $c->forward('process_update');
     $c->forward('process_user');
-    $c->forward('/report/new/process_photo');
+    $c->forward('/photo/process_photo');
     $c->forward('check_for_errors')
       or $c->go( '/report/display', [ $c->req->param('id') ] );
 
@@ -76,6 +76,10 @@ sub update_problem : Private {
         $problem->state('confirmed');
     }
 
+    if ( $c->cobrand->can_support_problems && $c->user && $c->user->from_body && $c->req->param('external_source_id') ) {
+        $problem->interest_count( \'interest_count + 1' );
+    }
+
     $problem->lastupdate( \'ms_current_timestamp()' );
     $problem->update;
 
@@ -104,13 +108,18 @@ sub process_user : Private {
         my $user = $c->user->obj;
         my $name = scalar $c->req->param('name');
         $user->name( Utils::trim_text( $name ) ) if $name;
+        my $title = scalar $c->req->param('fms_extra_title');
+        if ( $title ) {
+            $c->log->debug( 'user exists and title is ' . $title );
+            $user->title( Utils::trim_text( $title ) );
+        }
         $update->user( $user );
         return 1;
     }
 
     # Extract all the params to a hash to make them easier to work with
     my %params = map { $_ => scalar $c->req->param($_) }
-      ( 'rznvy', 'name', 'password_register' );
+      ( 'rznvy', 'name', 'password_register', 'fms_extra_title' );
 
     # cleanup the email address
     my $email = $params{rznvy} ? lc $params{rznvy} : '';
@@ -136,6 +145,8 @@ sub process_user : Private {
         if $params{name};
     $update->user->password( Utils::trim_text( $params{password_register} ) )
         if $params{password_register};
+    $update->user->title( Utils::trim_text( $params{fms_extra_title} ) )
+        if $params{fms_extra_title};
 
     return 1;
 }
@@ -152,6 +163,15 @@ want to move adding these elsewhere
 
 sub process_update : Private {
     my ( $self, $c ) = @_;
+
+    if ( $c->req->param('first_name' ) && $c->req->param('last_name' ) ) {
+        my $first_name = $c->req->param('first_name');
+        my $last_name = $c->req->param('last_name');
+        $c->req->param('name', sprintf( '%s %s', $first_name, $last_name ) );
+
+        $c->stash->{first_name} = $first_name;
+        $c->stash->{last_name} = $last_name;
+    }
 
     my %params =
       map { $_ => scalar $c->req->param($_) } ( 'update', 'name', 'fixed', 'state', 'reopen' );
@@ -173,7 +193,7 @@ sub process_update : Private {
             mark_fixed   => $params{fixed} ? 1 : 0,
             mark_open    => $params{reopen} ? 1 : 0,
             cobrand      => $c->cobrand->moniker,
-            cobrand_data => $c->cobrand->extra_update_data,
+            cobrand_data => '',
             lang         => $c->stash->{lang_code},
             anonymous    => $anonymous,
         }
@@ -181,9 +201,45 @@ sub process_update : Private {
 
     if ( $params{state} ) {
         $params{state} = 'fixed - council' 
-            if $params{state} eq 'fixed' && $c->user && $c->user->belongs_to_council( $update->problem->council );
+            if $params{state} eq 'fixed' && $c->user && $c->user->belongs_to_body( $update->problem->bodies_str );
         $update->problem_state( $params{state} );
+    } else {
+        # we do this so we have a record of the state of the problem at this point
+        # for use when sending updates to external parties
+        if ( $update->mark_fixed ) {
+            $update->problem_state( 'fixed - user' );
+        } elsif ( $update->mark_open ) {
+            $update->problem_state( 'confirmed' );
+        # if there is not state param and neither of the above conditions apply
+        # then we are not changing the state of the problem so can use the current
+        # problem state
+        } else {
+            my $problem = $c->stash->{problem} || $update->problem;
+            $update->problem_state( $problem->state );
+        }
     }
+
+
+    my @extra; # Next function fills this, but we don't need it here.
+    # This is just so that the error checkign for these extra fields runs.
+    # TODO Use extra here as it is used on reports.
+    $c->cobrand->process_extras( $c, $update->problem->bodies_str, \@extra );
+
+    if ( $c->req->param('fms_extra_title') ) {
+        my %extras = ();
+        $extras{title} = $c->req->param('fms_extra_title');
+        $extras{email_alerts_requested} = $c->req->param('add_alert');
+        $update->extra( \%extras );
+    }
+
+    if ( $c->stash->{ first_name } && $c->stash->{ last_name } ) {
+        my $extra = $update->extra || {};
+        $extra->{first_name} = $c->stash->{ first_name };
+        $extra->{last_name} = $c->stash->{ last_name };
+        $update->extra( $extra );
+    }
+
+    $c->log->debug( 'name is ' . $c->req->param('name') );
 
     $c->stash->{update}        = $update;
     $c->stash->{add_alert}     = $c->req->param('add_alert');
@@ -205,10 +261,11 @@ sub check_for_errors : Private {
     # they have to be an authority user to update the state
     if ( $c->req->param('state') ) {
         my $error = 0;
-        $error = 1 unless $c->user && $c->user->belongs_to_council( $c->stash->{update}->problem->council );
+        $error = 1 unless $c->user && $c->user->belongs_to_body( $c->stash->{update}->problem->bodies_str );
 
         my $state = $c->req->param('state');
-        $error = 1 unless ( grep { $state eq $_ } ( qw/confirmed closed fixed investigating planned/, 'in progress', 'fixed', 'fixed - user', 'fixed - council' ) );
+        $state = 'fixed - council' if $state eq 'fixed';
+        $error = 1 unless ( grep { $state eq $_ } ( FixMyStreet::DB::Result::Problem->council_states() ) );
 
         if ( $error ) {
             $c->stash->{errors} ||= [];
@@ -255,7 +312,14 @@ sub save_update : Private {
 
     my $update = $c->stash->{update};
 
-    if ( !$update->user->in_storage ) {
+    if ( $c->cobrand->never_confirm_updates ) {
+        if ( $update->user->in_storage() ) {
+            $update->user->update();
+        } else {
+            $update->user->insert();
+        }
+        $update->confirm();
+    } elsif ( !$update->user->in_storage ) {
         # User does not exist.
         # Store changes in token for when token is validated.
         $c->stash->{token_data} = {
@@ -268,6 +332,7 @@ sub save_update : Private {
     }
     elsif ( $c->user && $c->user->id == $update->user->id ) {
         # Logged in and same user, so can confirm update straight away
+        $c->log->debug( 'user exists' );
         $update->user->update;
         $update->confirm;
     } else {
@@ -310,7 +375,9 @@ sub redirect_or_confirm_creation : Private {
     if ( $update->confirmed ) {
         $c->forward( 'update_problem' );
         $c->forward( 'signup_for_alerts' );
-        my $report_uri = $c->uri_for( '/report', $update->problem_id );
+
+        my $report_uri = $c->cobrand->base_url_for_report( $update->problem ) . $update->problem->url;
+        $c->flash->{comment_created} = 1;
         $c->res->redirect($report_uri);
         $c->detach;
     }
@@ -357,14 +424,20 @@ sub signup_for_alerts : Private {
 
     if ( $c->stash->{add_alert} ) {
         my $update = $c->stash->{update};
-        my $alert = $c->model('DB::Alert')->find_or_create(
-            user         => $update->user,
-            alert_type   => 'new_updates',
-            parameter    => $update->problem_id,
-            cobrand      => $update->cobrand,
-            cobrand_data => $update->cobrand_data,
-            lang         => $update->lang,
-        );
+        my $options = {
+            user => $update->user,
+            alert_type => 'new_updates',
+            parameter => $update->problem_id,
+        };
+        my $alert = $c->model('DB::Alert')->find($options);
+        unless ($alert) {
+            $alert = $c->model('DB::Alert')->create({
+                %$options,
+                cobrand      => $update->cobrand,
+                cobrand_data => $update->cobrand_data,
+                lang         => $update->lang,
+            });
+        }
         $alert->confirm();
 
     } elsif ( $c->user && ( my $alert = $c->user->alert_for_problem($c->stash->{update}->problem_id) ) ) {

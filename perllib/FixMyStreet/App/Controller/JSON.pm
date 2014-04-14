@@ -8,6 +8,7 @@ use JSON;
 use DateTime;
 use DateTime::Format::ISO8601;
 use List::MoreUtils 'uniq';
+use FixMyStreet::App;
 
 =head1 NAME
 
@@ -80,11 +81,13 @@ sub problems : Local {
         $date_col = 'lastupdate';
     }
 
+    my $dt_parser = FixMyStreet::App->model('DB')->schema->storage->datetime_parser;
+
     my $one_day = DateTime::Duration->new( days => 1 );
     my $query = {
         $date_col => {
-            '>=' => $start_dt,
-            '<=' => $end_dt + $one_day,
+            '>=' => $dt_parser->format_datetime($start_dt),
+            '<=' => $dt_parser->format_datetime($end_dt + $one_day),
         },
         state => [ @state ],
     };
@@ -92,7 +95,7 @@ sub problems : Local {
     my @problems = $c->cobrand->problems->search( $query, {
         order_by => { -asc => 'confirmed' },
         columns => [
-            'id',       'title', 'council',   'category',
+            'id',       'title', 'bodies_str',   'category',
             'detail',   'name',  'anonymous', 'confirmed',
             'whensent', 'service',
             'latitude', 'longitude', 'used_map',
@@ -100,23 +103,13 @@ sub problems : Local {
         ]
     } );
 
-    my @councils;
     foreach my $problem (@problems) {
         $problem->name( '' ) if $problem->anonymous == 1;
         $problem->service( 'Web interface' ) if $problem->service eq '';
-        if ($problem->council) {
-            (my $council = $problem->council) =~ s/\|.*//g;
-            my @council_ids = split /,/, $council;
-            push(@councils, @council_ids);
-            $problem->council( \@council_ids );
-        }
-    }
-    @councils = uniq @councils;
-    my $areas_info = mySociety::MaPit::call('areas', \@councils);
-    foreach my $problem (@problems) {
-        if ($problem->council) {
-             my @council_names = map { $areas_info->{$_}->{name} } @{$problem->council} ;
-             $problem->council( join(' and ', @council_names) );
+        my $bodies = $problem->bodies;
+        if (keys %$bodies) {
+             my @body_names = map { $_->name } values %$bodies;
+             $problem->bodies_str( join(' and ', @body_names) );
         }
     }
 

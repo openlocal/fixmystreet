@@ -14,6 +14,7 @@ use File::Slurp;
 use File::Path ();
 use LWP::Simple;
 use Digest::MD5 qw(md5_hex);
+use mySociety::Locale;
 
 # string STRING CONTEXT
 # Looks up on Google Maps API, and caches, a user-inputted location.
@@ -21,13 +22,21 @@ use Digest::MD5 qw(md5_hex);
 # an array of matches if there are more than one. The information in the query
 # may be used to disambiguate the location in cobranded versions of the site.
 sub string {
-    my ( $s, $c, $params ) = @_;
+    my ( $s, $c ) = @_;
+
+    my $params = $c->cobrand->disambiguate_location($s);
+
+    $s = FixMyStreet::Geocode::escape($s);
 
     my $url = 'http://maps.google.com/maps/geo?q=' . $s;
-      $url .=  '&ll=' . $params->{centre}  if $params->{centre};
-      $url .= '&spn=' . $params->{span}    if $params->{span};
-      $url .=  '&gl=' . $params->{country} if $params->{country};
-      $url .=  '&hl=' . $params->{lang}    if $params->{lang};
+    $url .=  '&ll=' . $params->{centre}  if $params->{centre};
+    $url .= '&spn=' . $params->{span}    if $params->{span};
+    if ($params->{google_country}) {
+        $url .=  '&gl=' . $params->{google_country};
+    } elsif ($params->{country}) {
+        $url .=  '&gl=' . $params->{country};
+    }
+    $url .=  '&hl=' . $params->{lang}    if $params->{lang};
 
     my $cache_dir = FixMyStreet->config('GEO_CACHE') . 'google/';
     my $cache_file = $cache_dir . md5_hex($url);
@@ -58,9 +67,6 @@ sub string {
 
     if (!$js) {
         return { error => _('Sorry, we could not parse that location. Please try again.') };
-    } elsif ($js =~ /BT\d/) {
-        # Northern Ireland, hopefully
-        return { error => _("We do not currently cover Northern Ireland, I'm afraid.") };
     }
 
     $js = JSON->new->utf8->allow_nonref->decode($js);
@@ -75,7 +81,14 @@ sub string {
         my $address = $_->{address};
         next unless $c->cobrand->geocoded_string_check( $address );
         ( $longitude, $latitude ) = @{ $_->{Point}->{coordinates} };
-        push (@$error, { address => $address, latitude => $latitude, longitude => $longitude });
+        # These co-ordinates are output as query parameters in a URL, make sure they have a "."
+        mySociety::Locale::in_gb_locale {
+            push (@$error, {
+                address => $address,
+                latitude => sprintf('%0.6f', $latitude),
+                longitude => sprintf('%0.6f', $longitude)
+            });
+        };
         push (@valid_locations, $_);
     }
     return { latitude => $latitude, longitude => $longitude } if scalar @valid_locations == 1;

@@ -35,7 +35,7 @@ my $dt = DateTime->new(
 my $report = FixMyStreet::App->model('DB::Problem')->find_or_create(
     {
         postcode           => 'SW1A 1AA',
-        council            => '2504',
+        bodies_str         => '2504',
         areas              => ',105255,11806,11828,2247,2504,',
         category           => 'Other',
         title              => 'Test 2',
@@ -271,7 +271,7 @@ for my $test (
         $mech->submit_form_ok( { with_fields => $test->{fields} },
             'submit update' );
 
-        is_deeply $mech->form_errors, $test->{field_errors}, 'field errors';
+        is_deeply $mech->page_errors, $test->{field_errors}, 'field errors';
 
         my $values = {
             %{ $test->{fields} },
@@ -407,9 +407,88 @@ for my $test (
 $report->state('confirmed');
 $report->update;
 
+for my $test (
+    {
+        desc => 'overriding email confirmation allows report confirmation with no email sent',
+        initial_values => {
+            name          => '',
+            rznvy         => '',
+            may_show_name => 1,
+            add_alert     => 1,
+            photo         => '',
+            update        => '',
+            fixed         => undef,
+            remember_me => undef,
+            password_register => '',
+            password_sign_in => '',
+        },
+        form_values => {
+            submit_update => 1,
+            rznvy         => 'unregistered@example.com',
+            update        => "update no email confirm",
+            add_alert     => 1,
+            name          => 'Unreg User',
+            may_show_name => undef,
+        },
+        changes => {
+            update => "Update no email confirm",
+        },
+    }
+) {
+    subtest $test->{desc} => sub {
+        my $send_confirmation_mail_override = Sub::Override->new(
+            "FixMyStreet::Cobrand::Default::never_confirm_updates",
+            sub { return 1; }
+        );
+        $mech->log_out_ok();
+        $mech->clear_emails_ok();
+
+        $mech->get_ok("/report/$report_id");
+
+        my $values = $mech->visible_form_values('updateForm');
+
+        is_deeply $values, $test->{initial_values}, 'initial form values';
+
+        $mech->submit_form_ok(
+            {
+                with_fields => $test->{form_values}
+            },
+            'submit update'
+        );
+
+        $mech->content_contains('Test 2');
+        $mech->content_contains('Update no email confirm');
+
+        my $email = $mech->email_count_is(0);
+
+        my $update =
+          FixMyStreet::App->model('DB::Comment')->find( { problem_id => $report_id, text => 'Update no email confirm' } );
+        my $update_id = $update->id;
+
+        $mech->content_contains('name="update_' . $update_id . '"');
+
+        my $details = {
+            %{ $test->{form_values} },
+            %{ $test->{changes} }
+        };
+
+        ok $update, 'found update in database';
+        is $update->state, 'confirmed', 'update confirmed';
+        is $update->user->email, $details->{rznvy}, 'update email';
+        is $update->text, $details->{update}, 'update text';
+
+        my $unreg_user = FixMyStreet::App->model( 'DB::User' )->find( { email => $details->{rznvy} } );
+
+        ok $unreg_user, 'found user';
+
+        $mech->delete_user( $unreg_user );
+        $send_confirmation_mail_override->restore();
+    };
+}
+
 subtest 'check non authority user cannot change set state' => sub {
     $mech->log_in_ok( $user->email );
-    $user->from_council( 0 );
+    $user->from_body( undef );
     $user->update;
 
     $mech->get_ok("/report/$report_id");
@@ -434,10 +513,12 @@ subtest 'check non authority user cannot change set state' => sub {
     is $report->state, 'confirmed', 'state unchanged';
 };
 
+$mech->create_body_ok(2504, 'Westminster City Council');
+
 for my $state ( qw/unconfirmed hidden partial/ ) {
     subtest "check that update cannot set state to $state" => sub {
         $mech->log_in_ok( $user->email );
-        $user->from_council( 2504 );
+        $user->from_body( 2504 );
         $user->update;
 
         $mech->get_ok("/report/$report_id");
@@ -477,18 +558,6 @@ for my $test (
         state => 'investigating',
     },
     {
-        desc => 'from authority user marks report as planned',
-        fields => {
-            name => $user->name,
-            may_show_name => 1,
-            add_alert => undef,
-            photo => '',
-            update => 'Set state to planned',
-            state => 'planned',
-        },
-        state => 'planned',
-    },
-    {
         desc => 'from authority user marks report as in progress',
         fields => {
             name => $user->name,
@@ -499,18 +568,6 @@ for my $test (
             state => 'in progress',
         },
         state => 'in progress',
-    },
-    {
-        desc => 'from authority user marks report as closed',
-        fields => {
-            name => $user->name,
-            may_show_name => 1,
-            add_alert => undef,
-            photo => '',
-            update => 'Set state to closed',
-            state => 'closed',
-        },
-        state => 'closed',
     },
     {
         desc => 'from authority user marks report as fixed',
@@ -525,16 +582,80 @@ for my $test (
         state => 'fixed - council',
     },
     {
-        desc => 'from authority user marks report as confirmed',
+        desc => 'from authority user marks report as action scheduled',
         fields => {
             name => $user->name,
             may_show_name => 1,
             add_alert => undef,
             photo => '',
-            update => 'Set state to confirmed',
-            state => 'confirmed',
+            update => 'Set state to action scheduled',
+            state => 'action scheduled',
         },
-        state => 'confirmed',
+        state => 'action scheduled',
+    },
+    {
+        desc => 'from authority user marks report as unable to fix',
+        fields => {
+            name => $user->name,
+            may_show_name => 1,
+            add_alert => undef,
+            photo => '',
+            update => 'Set state to unable to fix',
+            state => 'unable to fix',
+        },
+        state => 'unable to fix',
+    },
+    {
+        desc => 'from authority user marks report as internal referral',
+        fields => {
+            name => $user->name,
+            may_show_name => 1,
+            add_alert => undef,
+            photo => '',
+            update => 'Set state to internal referral',
+            state => 'internal referral',
+        },
+        state => 'internal referral',
+        meta  => "an internal referral",
+    },
+    {
+        desc => 'from authority user marks report as not responsible',
+        fields => {
+            name => $user->name,
+            may_show_name => 1,
+            add_alert => undef,
+            photo => '',
+            update => 'Set state to not responsible',
+            state => 'not responsible',
+        },
+        state => 'not responsible',
+        meta  => "not the council's responsibility"
+    },
+    {
+        desc => 'from authority user marks report as duplicate',
+        fields => {
+            name => $user->name,
+            may_show_name => 1,
+            add_alert => undef,
+            photo => '',
+            update => 'Set state to duplicate',
+            state => 'duplicate',
+        },
+        state => 'duplicate',
+        meta  => 'a duplicate report',
+    },
+    {
+        desc => 'from authority user marks report as internal referral',
+        fields => {
+            name => $user->name,
+            may_show_name => 1,
+            add_alert => undef,
+            photo => '',
+            update => 'Set state to internal referral',
+            state => 'internal referral',
+        },
+        state => 'internal referral',
+        meta  => 'an internal referral',
     },
     {
         desc => 'from authority user marks report sent to two councils as fixed',
@@ -547,18 +668,18 @@ for my $test (
             state => 'fixed',
         },
         state => 'fixed - council',
-        report_councils => '2504,2505',
+        report_bodies => '2504,2505',
     },
 ) {
     subtest $test->{desc} => sub {
         $report->comments->delete;
-        if ( $test->{ report_councils } ) {
-            $report->council( $test->{ report_councils } );
+        if ( $test->{ report_bodies } ) {
+            $report->bodies_str( $test->{ report_bodies } );
             $report->update;
         }
 
         $mech->log_in_ok( $user->email );
-        $user->from_council( 2504 );
+        $user->from_body( 2504 );
         $user->update;
 
         $mech->get_ok("/report/$report_id");
@@ -577,7 +698,12 @@ for my $test (
         is $update->problem_state, $test->{state}, 'problem state set';
 
         my $update_meta = $mech->extract_update_metas;
-        like $update_meta->[0], qr/marked as $test->{fields}->{state}$/, 'update meta includes state change';
+        my $meta_state = $test->{meta} || $test->{fields}->{state};
+        if ( $test->{reopened} ) {
+            like $update_meta->[0], qr/reopened$/, 'update meta says reopened';
+        } else {
+            like $update_meta->[0], qr/marked as $meta_state$/, 'update meta includes state change';
+        }
         like $update_meta->[0], qr{Test User \(Westminster City Council\)}, 'update meta includes council name';
         $mech->content_contains( 'Test User (<strong>Westminster City Council</strong>)', 'council name in bold');
 
@@ -586,11 +712,200 @@ for my $test (
     };
 }
 
-$user->from_council(0);
+subtest 'check meta correct for comments marked confirmed but not marked open' => sub {
+    $report->comments->delete;
+    my $comment = FixMyStreet::App->model('DB::Comment')->create(
+        {
+            user          => $user,
+            problem_id    => $report->id,
+            text          => 'update text',
+            confirmed     => DateTime->now( time_zone => 'local' ),
+            problem_state => 'confirmed',
+            anonymous     => 0,
+            mark_open     => 0,
+            mark_fixed    => 0,
+            state         => 'confirmed',
+        }
+    );
+
+    $mech->get_ok( "/report/" . $report->id );
+    my $update_meta = $mech->extract_update_metas;
+    unlike $update_meta->[0], qr/reopened$/,
+      'update meta does not say reopened';
+
+    $comment->update( { mark_open => 1, problem_state => undef } );
+    $mech->get_ok( "/report/" . $report->id );
+    $update_meta = $mech->extract_update_metas;
+
+    unlike $update_meta->[0], qr/marked as open$/,
+      'update meta does not says marked as open';
+    like $update_meta->[0], qr/reopened$/, 'update meta does say reopened';
+
+    $comment->update( { mark_open => 0, problem_state => undef } );
+    $mech->get_ok( "/report/" . $report->id );
+    $update_meta = $mech->extract_update_metas;
+
+    unlike $update_meta->[0], qr/marked as open$/,
+      'update meta does not says marked as open';
+    unlike $update_meta->[0], qr/reopened$/, 'update meta does not say reopened';
+};
+
+subtest "check first comment with no status change has no status in meta" => sub {
+    $mech->log_in_ok( $user->email );
+    $user->from_body( undef );
+    $user->update;
+
+    my $comment = $report->comments->first;
+    $comment->update( { mark_fixed => 0, problem_state => 'confirmed' } );
+
+    $mech->get_ok("/report/$report_id");
+
+    my $update_meta = $mech->extract_update_metas;
+    unlike $update_meta->[0], qr/marked as|reopened/, 'update meta does not include state change';
+};
+
+subtest "check comment with no status change has not status in meta" => sub {
+        $mech->log_in_ok( $user->email );
+        $user->from_body( undef );
+        $user->update;
+
+        my $comment = $report->comments->first;
+        $comment->update( { mark_fixed => 1, problem_state => 'fixed - council' } );
+
+        $mech->get_ok("/report/$report_id");
+
+        $mech->submit_form_ok(
+            {
+                with_fields => {
+                    name => $user->name,
+                    may_show_name => 1,
+                    add_alert => undef,
+                    photo => '',
+                    update => 'Comment that does not change state',
+                },
+            },
+            'submit update'
+        );
+
+        $report->discard_changes;
+        my @updates = $report->comments->all;
+        is scalar @updates, 2, 'correct number of updates';
+
+        my $update = pop @updates;
+
+        is $report->state, 'fixed - council', 'correct report state';
+        is $update->problem_state, 'fixed - council', 'correct update state';
+        my $update_meta = $mech->extract_update_metas;
+        unlike $update_meta->[1], qr/marked as/, 'update meta does not include state change';
+
+        $user->from_body( 2504 );
+        $user->update;
+
+        $mech->get_ok("/report/$report_id");
+
+        $mech->submit_form_ok(
+            {
+                with_fields => {
+                    name => $user->name,
+                    may_show_name => 1,
+                    add_alert => undef,
+                    photo => '',
+                    update => 'Comment that sets state to investigating',
+                    state => 'investigating',
+                },
+            },
+            'submit update'
+        );
+
+        $report->discard_changes;
+        @updates = $report->comments->search(undef, { order_by => 'created' })->all;;
+
+        is scalar @updates, 3, 'correct number of updates';
+
+        $update = pop @updates;
+
+        is $report->state, 'investigating', 'correct report state';
+        is $update->problem_state, 'investigating', 'correct update state';
+        $update_meta = $mech->extract_update_metas;
+        like $update_meta->[0], qr/marked as fixed/, 'first update meta says fixed';
+        unlike $update_meta->[1], qr/marked as/, 'second update meta does not include state change';
+        like $update_meta->[2], qr/marked as investigating/, 'third update meta says investigating';
+
+        my $dt = DateTime->now( time_zone => "local" )->add( seconds => 1 );
+        $comment = FixMyStreet::App->model('DB::Comment')->find_or_create(
+            {
+                problem_id => $report_id,
+                user_id    => $user->id,
+                name       => 'Other User',
+                mark_fixed => 'false',
+                text       => 'This is some update text',
+                state      => 'confirmed',
+                confirmed  => $dt->ymd . ' ' . $dt->hms,
+                anonymous  => 'f',
+            }
+        );
+
+        $mech->get_ok("/report/$report_id");
+
+        $report->discard_changes;
+        @updates = $report->comments->search(undef, { order_by => 'created' })->all;;
+        is scalar @updates, 4, 'correct number of updates';
+
+        $update = pop @updates;
+
+        is $report->state, 'investigating', 'correct report state';
+        is $update->problem_state, undef, 'no update state';
+        $update_meta = $mech->extract_update_metas;
+        like $update_meta->[0], qr/marked as fixed/, 'first update meta says fixed';
+        unlike $update_meta->[1], qr/marked as/, 'second update meta does not include state change';
+        like $update_meta->[2], qr/marked as investigating/, 'third update meta says investigating';
+        unlike $update_meta->[3], qr/marked as/, 'fourth update meta has no state change';
+};
+
+subtest 'check meta correct for second comment marking as reopened' => sub {
+    $report->comments->delete;
+    my $comment = FixMyStreet::App->model('DB::Comment')->create(
+        {
+            user          => $user,
+            problem_id    => $report->id,
+            text          => 'update text',
+            confirmed     => DateTime->now( time_zone => 'local'),
+            problem_state => 'fixed - user',
+            anonymous     => 0,
+            mark_open     => 0,
+            mark_fixed    => 1,
+            state         => 'confirmed',
+        }
+    );
+
+    $mech->get_ok( "/report/" . $report->id );
+    my $update_meta = $mech->extract_update_metas;
+    like $update_meta->[0], qr/fixed$/, 'update meta says fixed';
+
+    $comment = FixMyStreet::App->model('DB::Comment')->create(
+        {
+            user          => $user,
+            problem_id    => $report->id,
+            text          => 'update text',
+            confirmed     => DateTime->now( time_zone => 'local' ) + DateTime::Duration->new( minutes => 1 ),
+            problem_state => 'confirmed',
+            anonymous     => 0,
+            mark_open     => 0,
+            mark_fixed    => 0,
+            state         => 'confirmed',
+        }
+    );
+
+    $mech->get_ok( "/report/" . $report->id );
+    $update_meta = $mech->extract_update_metas;
+    like $update_meta->[1], qr/reopened$/, 'update meta says reopened';
+};
+
+$user->from_body(undef);
 $user->update;
 
 $report->state('confirmed');
-$report->council('2504');
+$report->bodies_str('2504');
 $report->update;
 
 for my $test (
@@ -640,7 +955,7 @@ for my $test (
             'submit update'
         );
 
-        is_deeply $mech->form_errors, $test->{field_errors}, 'check there were errors';
+        is_deeply $mech->page_errors, $test->{field_errors}, 'check there were errors';
 
         SKIP: {
             skip( "Incorrect password", 5 ) unless $test->{form_values}{password_sign_in} eq $pw;
@@ -872,7 +1187,11 @@ for my $test (
 
         is_deeply $values, $test->{initial_values}, 'initial form values';
 
-        is $mech->extract_problem_banner->{text}, $test->{initial_banner}, 'initial banner';
+        if ( !defined( $test->{initial_banner} ) ) {
+            is $mech->extract_problem_banner->{text}, undef, 'initial banner';
+        } else {
+            like $mech->extract_problem_banner->{text}, qr/@{[ $test->{initial_banner} ]}/i, 'initial banner';
+        }
 
         $mech->submit_form_ok(
             {
@@ -883,7 +1202,11 @@ for my $test (
 
         is $mech->uri->path, "/report/" . $report_id, "redirected to report page";
 
-        is $mech->extract_problem_banner->{text}, $test->{endstate_banner}, 'submitted banner';
+        if ( !defined( $test->{endstate_banner} ) ) {
+            is $mech->extract_problem_banner->{text}, undef, 'endstate banner';
+        } else {
+            like $mech->extract_problem_banner->{text}, qr/@{[ $test->{endstate_banner} ]}/i, 'endstate banner';
+        }
 
         $mech->email_count_is(0);
 
@@ -1029,8 +1352,12 @@ foreach my $test (
 
         is_deeply $values, $test->{initial_values}, 'initial form values';
 
-        is $mech->extract_problem_banner->{text}, $test->{initial_banner},
-          'initial banner';
+        if ( !defined( $test->{initial_banner} ) ) {
+            is $mech->extract_problem_banner->{text}, undef, 'initial banner';
+        } else {
+            like $mech->extract_problem_banner->{text}, qr/@{[ $test->{initial_banner} ]}/i,
+              'initial banner';
+        }
 
         $mech->submit_form_ok( { with_fields => $test->{fields}, },
             'submit update' );
@@ -1227,6 +1554,254 @@ for my $test (
         if ($questionnaire) {
             $questionnaire->delete;
             ok !$questionnaire->in_storage, 'questionnaire deleted';
+        }
+    };
+}
+
+for my $test (
+    {
+        desc => 'update confirmed without marking as fixed leaves state unchanged',
+        initial_state => 'confirmed',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 0,
+        },
+        end_state => 'confirmed',
+    },
+    {
+        desc => 'update investigating without marking as fixed leaves state unchanged',
+        initial_state => 'investigating',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 0,
+        },
+        end_state => 'investigating',
+    },
+    {
+        desc => 'update in progress without marking as fixed leaves state unchanged',
+        initial_state => 'in progress',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 0,
+        },
+        end_state => 'in progress',
+    },
+    {
+        desc => 'update action scheduled without marking as fixed leaves state unchanged',
+        initial_state => 'action scheduled',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 0,
+        },
+        end_state => 'action scheduled',
+    },
+    {
+        desc => 'update fixed without marking as open leaves state unchanged',
+        initial_state => 'fixed',
+        expected_form_fields => {
+            reopen => undef,
+        },
+        submitted_form_fields => {
+            reopen => 0,
+        },
+        end_state => 'fixed',
+    },
+    {
+        desc => 'update unable to fix without marking as fixed leaves state unchanged',
+        initial_state => 'unable to fix',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 0,
+        },
+        end_state => 'unable to fix',
+    },
+    {
+        desc => 'update internal referral without marking as fixed leaves state unchanged',
+        initial_state => 'internal referral',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 0,
+        },
+        end_state => 'internal referral',
+    },
+    {
+        desc => 'update not responsible without marking as fixed leaves state unchanged',
+        initial_state => 'not responsible',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 0,
+        },
+        end_state => 'not responsible',
+    },
+    {
+        desc => 'update duplicate without marking as fixed leaves state unchanged',
+        initial_state => 'duplicate',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 0,
+        },
+        end_state => 'duplicate',
+    },
+    {
+        desc => 'can mark confirmed as fixed',
+        initial_state => 'confirmed',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 1,
+        },
+        end_state => 'fixed - user',
+    },
+    {
+        desc => 'can mark investigating as fixed',
+        initial_state => 'investigating',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 1,
+        },
+        end_state => 'fixed - user',
+    },
+    {
+        desc => 'can mark in progress as fixed',
+        initial_state => 'in progress',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 1,
+        },
+        end_state => 'fixed - user',
+    },
+    {
+        desc => 'can mark action scheduled as fixed',
+        initial_state => 'action scheduled',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 1,
+        },
+        end_state => 'fixed - user',
+    },
+    {
+        desc => 'cannot mark fixed as fixed, can mark as not fixed',
+        initial_state => 'fixed',
+        expected_form_fields => {
+            reopen => undef,
+        },
+        submitted_form_fields => {
+            reopen => 1,
+        },
+        end_state => 'confirmed',
+    },
+    {
+        desc => 'can mark unable to fix as fixed, cannot mark not closed',
+        initial_state => 'unable to fix',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 1,
+        },
+        end_state => 'fixed - user',
+    },
+    {
+        desc => 'can mark internal referral as fixed, cannot mark not closed',
+        initial_state => 'internal referral',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 1,
+        },
+        end_state => 'fixed - user',
+    },
+    {
+        desc => 'can mark not responsible as fixed, cannot mark not closed',
+        initial_state => 'not responsible',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 1,
+        },
+        end_state => 'fixed - user',
+    },
+    {
+        desc => 'can mark duplicate as fixed, cannot mark not closed',
+        initial_state => 'duplicate',
+        expected_form_fields => {
+            fixed => undef,
+        },
+        submitted_form_fields => {
+            fixed => 1,
+        },
+        end_state => 'fixed - user',
+    },
+) {
+    subtest $test->{desc} => sub {
+        $mech->log_in_ok( $report->user->email );
+
+        my %standard_fields = (
+            name => $report->user->name,
+            update => 'update text',
+            photo         => '',
+            may_show_name => 1,
+            add_alert => 1,
+        );
+
+        my %expected_fields = (
+            %standard_fields,
+            %{ $test->{expected_form_fields} },
+            update => '',
+        );
+
+        my %submitted_fields = (
+            %standard_fields,
+            %{ $test->{submitted_form_fields} },
+        );
+
+        # clear out comments for this problem to make
+        # checking details easier later
+        ok( $_->delete, 'deleted comment ' . $_->id ) for $report->comments;
+
+        $report->discard_changes;
+        $report->state($test->{initial_state});
+        $report->update;
+
+        $mech->get_ok("/report/$report_id");
+
+        my $values = $mech->visible_form_values('updateForm');
+        is_deeply $values, \%expected_fields, 'correct form fields present';
+
+        if ( $test->{submitted_form_fields} ) {
+            $mech->submit_form_ok( {
+                    with_fields => \%submitted_fields
+                },
+                'submit update'
+            );
+
+            $report->discard_changes;
+            is $report->state, $test->{end_state}, 'update sets correct report state';
         }
     };
 }

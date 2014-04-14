@@ -7,12 +7,15 @@ use Path::Class;
 my $ROOT_DIR = file(__FILE__)->parent->parent->absolute->resolve;
 
 use Readonly;
+use Sub::Override;
 
 use mySociety::Config;
 use mySociety::DBHandle;
 
+my $CONF_FILE = $ENV{FMS_OVERRIDE_CONFIG} || 'general';
+
 # load the config file and store the contents in a readonly hash
-mySociety::Config::set_file( __PACKAGE__->path_to("conf/general") );
+mySociety::Config::set_file( __PACKAGE__->path_to("conf/${CONF_FILE}") );
 Readonly::Hash my %CONFIG, %{ mySociety::Config::get_list() };
 
 =head1 NAME
@@ -33,7 +36,7 @@ Thus module has utility functions for the FMS project.
     FixMyStreet->test_mode( $bool );
     my $in_test_mode_bool = FixMyStreet->test_mode;
 
-Put the FixMyStreet into test mode - inteded for the unit tests:
+Put the FixMyStreet into test mode - intended for the unit tests:
 
     BEGIN {
         use FixMyStreet;
@@ -83,6 +86,42 @@ sub config {
 
     my $key = shift;
     return exists $CONFIG{$key} ? $CONFIG{$key} : undef;
+}
+
+sub override_config($&) {
+    my $config = shift;
+    my $code = \&{shift @_};
+
+    mySociety::MaPit::configure($config->{MAPIT_URL}) if $config->{MAPIT_URL};
+
+    # For historical reasons, we have two ways of asking for config variables.
+    # Override them both, I'm sure we'll find time to get rid of one eventually.
+    my $override_guard1 = Sub::Override->new(
+        "FixMyStreet::config",
+        sub {
+            my ($class, $key) = @_;
+            return { %CONFIG, %$config } unless $key;
+            return $config->{$key} if exists $config->{$key};
+            my $orig_config = mySociety::Config::load_default();
+            return $orig_config->{$key} if exists $orig_config->{$key};
+        }
+    );
+    my $override_guard2 = Sub::Override->new(
+        "mySociety::Config::get",
+        sub ($;$) {
+            my ($key, $default) = @_;
+            return $config->{$key} if exists $config->{$key};
+            my $orig_config = mySociety::Config::load_default();
+            return $orig_config->{$key} if exists $orig_config->{$key};
+            return $default if @_ == 2;
+        }
+    );
+
+    $code->();
+
+    $override_guard1->restore();
+    $override_guard2->restore();
+    mySociety::MaPit::configure() if $config->{MAPIT_URL};;
 }
 
 =head2 dbic_connect_info

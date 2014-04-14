@@ -2,7 +2,11 @@ package FixMyStreet::App;
 use Moose;
 use namespace::autoclean;
 
+# Should move away from Email::Send, but until then:
+$Return::Value::NO_CLUCK = 1;
+
 use Catalyst::Runtime 5.80;
+use DateTime;
 use FixMyStreet;
 use FixMyStreet::Cobrand;
 use Memcached;
@@ -23,6 +27,7 @@ use Catalyst (
     'Session::State::Cookie',    # FIXME - we're using our own override atm
     'Authentication',
     'SmartURI',
+    'Compress::Gzip',
 );
 
 extends 'Catalyst';
@@ -45,7 +50,7 @@ __PACKAGE__->config(
     default_view => 'Web',
 
     # Serve anything in web dir that is not a .cgi script
-    static => {    #
+    'Plugin::Static::Simple' => {
         include_path      => [ FixMyStreet->path_to("web") . "" ],
         ignore_extensions => ['cgi'],
     },
@@ -53,6 +58,7 @@ __PACKAGE__->config(
     'Plugin::Session' => {    # Catalyst::Plugin::Session::Store::DBIC
         dbic_class     => 'DB::Session',
         expires        => 3600 * 24 * 7 * 4, # 4 weeks
+        cookie_secure  => 2,
     },
 
     'Plugin::Authentication' => {
@@ -83,6 +89,13 @@ __PACKAGE__->config(
 
 # Start the application
 __PACKAGE__->setup();
+
+# Due to some current issues with proxyings, need to manually
+# tell the code we're secure if we are.
+after 'prepare_headers' => sub {
+    my $self = shift;
+    $self->req->secure( 1 ) if $self->config->{BASE_URL} eq 'https://www.zueriwieneu.ch';
+};
 
 # set up DB handle for old code
 FixMyStreet->configure_mysociety_dbhandle;
@@ -152,17 +165,16 @@ sub setup_request {
     my $cobrand = $c->cobrand;
 
     # append the cobrand templates to the include path
-    $c->stash->{additional_template_paths} = $cobrand->path_to_web_templates
-      unless $cobrand->is_default;
+    $c->stash->{additional_template_paths} = $cobrand->path_to_web_templates;
 
     # work out which language to use
     my $lang_override = $c->get_override('lang');
     my $host          = $c->req->uri->host;
     my $lang =
         $lang_override ? $lang_override
-      : $host =~ /^en\./ ? 'en-gb'
-      : $host =~ /cy/    ? 'cy'
-      :                    undef;
+      : $host =~ /^(..)\./ ? $1
+      : undef;
+    $lang = 'en-gb' if $lang && $lang eq 'en';
 
     # set the language and the translation file to use - store it on stash
     my $set_lang = $cobrand->set_lang_and_domain(
@@ -176,16 +188,33 @@ sub setup_request {
     $c->log->debug( sprintf "Set lang to '%s' and cobrand to '%s'",
         $set_lang, $cobrand->moniker );
 
-    $c->model('DB::Problem')->set_restriction( $cobrand->site_restriction() );
+    $c->model('DB::Problem')->set_restriction( $cobrand->site_key() );
 
     Memcached::set_namespace( FixMyStreet->config('FMS_DB_NAME') . ":" );
 
-    my $map = $host =~ /^osm\./ ? 'OSM' : $c->req->param('map_override');
-    #if ($c->sessionid) {
-    #    $map = $c->session->{map};
-    #    $map = undef unless $map eq 'OSM';
-    #}
-    FixMyStreet::Map::set_map_class( $map );
+    FixMyStreet::Map::set_map_class( $cobrand->map_type || $c->req->param('map_override') );
+
+    unless ( FixMyStreet->config('MAPIT_URL') ) {
+        my $port = $c->req->uri->port;
+        $host = "$host:$port" unless $port == 80;
+        mySociety::MaPit::configure( "http://$host/fakemapit/" );
+    }
+
+    # XXX Put in cobrand / do properly
+    if ($c->cobrand->moniker eq 'zurich') {
+        FixMyStreet::DB::Result::Problem->visible_states_add_unconfirmed();
+        DateTime->DefaultLocale( 'de_CH' );
+    } else {
+        DateTime->DefaultLocale( 'en_US' );
+    }
+
+    if (FixMyStreet->test_mode) {
+        # Is there a better way of altering $c->config that may have
+        # override_config involved?
+        $c->setup_finished(0);
+        $c->config( %{ FixMyStreet->config() } );
+        $c->setup_finished(1);
+    }
 
     return $c;
 }
@@ -273,9 +302,8 @@ sub send_email {
     my $template           = shift;
     my $extra_stash_values = shift || {};
 
-    my $sender = $c->cobrand->contact_email;
+    my $sender = $c->config->{DO_NOT_REPLY_EMAIL};
     my $sender_name = $c->cobrand->contact_name;
-    $sender =~ s/team/fms-DO-NOT-REPLY/;
 
     # create the vars to pass to the email template
     my $vars = {
@@ -296,6 +324,8 @@ sub send_email {
     $email->header_set( ucfirst($_), $vars->{$_} )
       for grep { $vars->{$_} } qw( to from subject);
 
+    return if $c->is_abuser( $email->header('To') );
+
     $email->header_set( 'Message-ID', sprintf('<fms-%s-%s@%s>',
         time(), unpack('h*', random_bytes(5, 1)), $c->config->{EMAIL_DOMAIN}
     ) );
@@ -306,6 +336,7 @@ sub send_email {
         {
             _template_ => $email->body,    # will get line wrapped
             _parameters_ => {},
+            _line_indent => '',
             $email->header_pairs
         }
     ) };
@@ -319,10 +350,23 @@ sub send_email {
 sub send_email_cron {
     my ( $c, $params, $env_from, $env_to, $nomail ) = @_;
 
-    $params->{'Message-ID'} = sprintf('<fms-cron-%s-%s@mysociety.org>', time(),
-        unpack('h*', random_bytes(5, 1))
+    return 1 if $c->is_abuser( $env_to );
+
+    $params->{'Message-ID'} = sprintf('<fms-cron-%s-%s@%s>', time(),
+        unpack('h*', random_bytes(5, 1)), FixMyStreet->config('EMAIL_DOMAIN')
     );
 
+    $params->{_parameters_}->{signature} = '';
+    #$params->{_parameters_}->{signature} = $c->view('Email')->render(
+    #    $c, 'signature.txt', {
+    #        additional_template_paths => [
+    #            FixMyStreet->path_to( 'templates', 'email', $c->cobrand->moniker, $c->stash->{lang_code} )->stringify,
+    #            FixMyStreet->path_to( 'templates', 'email', $c->cobrand->moniker )->stringify,
+    #        ]
+    #    }
+    #);
+
+    $params->{_line_indent} = '';
     my $email = mySociety::Locale::in_gb_locale { mySociety::Email::construct_email($params) };
 
     if ( FixMyStreet->test_mode ) {
@@ -381,11 +425,10 @@ and uses that.
 =cut
 
 sub uri_for_email {
-    my $c    = shift;
-    my @args = @_;
+    my $c = shift;
 
     my $normal_uri = $c->uri_for(@_)->absolute;
-    my $base       = $c->cobrand->base_url_with_lang( 1 );
+    my $base       = $c->cobrand->base_url_with_lang;
 
     my $email_uri = $base . $normal_uri->path_query;
 
@@ -412,7 +455,7 @@ call), use this method.
 sub render_fragment {
     my ($c, $template, $vars) = @_;
     $vars->{additional_template_paths} = $c->cobrand->path_to_web_templates
-        if $vars && !$c->cobrand->is_default;
+        if $vars;
     $c->view('Web')->render($c, $template, $vars);
 }
 
@@ -425,20 +468,37 @@ Hashref contains height, width and url keys.
 
 sub get_photo_params {
     my ($self, $key) = @_;
-    $key = ($key eq 'id') ? '' : "/$key";
 
     return {} unless $self->photo;
 
+    $key = ($key eq 'id') ? '' : "/$key";
+
+    my $pre = "/photo$key/" . $self->id;
+    my $post = '.jpeg';
     my $photo = {};
+
     if (length($self->photo) == 40) {
-        $photo->{url_full} = '/photo' . $key . '/' . $self->id . '.full.jpeg';
+        $post .= '?' . $self->photo;
+        $photo->{url_full} = "$pre.full$post";
+        # XXX Can't use size here because {url} (currently 250px height) may be
+        # being used, but at this point it doesn't yet exist to find the width
+        # $str = FixMyStreet->config('UPLOAD_DIR') . $self->photo . '.jpeg';
     } else {
-        ( $photo->{width}, $photo->{height} ) =
-          Image::Size::imgsize( \$self->photo );
+        my $str = \$self->photo;
+        ( $photo->{width}, $photo->{height} ) = Image::Size::imgsize( $str );
     }
-    $photo->{url} = '/photo' . $key . '/' . $self->id . '.jpeg';
+
+    $photo->{url} = "$pre$post";
+    $photo->{url_tn} = "$pre.tn$post";
+    $photo->{url_fp} = "$pre.fp$post";
 
     return $photo;
+}
+
+sub is_abuser {
+    my ($c, $email) = @_;
+    my ($domain) = $email =~ m{ @ (.*) \z }x;
+    return $c->model('DB::Abuse')->search( { email => [ $email, $domain ] } )->first;
 }
 
 =head1 SEE ALSO

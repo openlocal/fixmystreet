@@ -8,24 +8,17 @@ use Carp;
 use mySociety::MaPit;
 use FixMyStreet::Geocode::OSM;
 
+sub path_to_web_templates {
+    my $self = shift;
+    return [ FixMyStreet->path_to( 'templates/web', $self->moniker )->stringify ];
+}
+
 sub country {
     return 'NO';
 }
 
-sub set_lang_and_domain {
-    my ( $self, $lang, $unicode, $dir ) = @_;
-    my $set_lang = mySociety::Locale::negotiate_language(
-        'en-gb,English,en_GB|nb,Norwegian,nb_NO', 'nb'
-    );
-    mySociety::Locale::gettext_domain( 'FixMyStreet', $unicode, $dir );
-    mySociety::Locale::change();
-    return $set_lang;
-}
-
-sub site_title {
-    my ($self) = @_;
-    return 'FiksGataMi';
-}
+sub languages { [ 'en-gb,English,en_GB', 'nb,Norwegian,nb_NO' ] }
+sub language_override { 'nb' }
 
 sub enter_postcode_text {
     my ( $self ) = @_;
@@ -41,19 +34,11 @@ sub disambiguate_location {
 }
 
 sub area_types {
-    return ( 'NKO', 'NFY', 'NRA' );
-}
-
-sub area_min_generation {
-    return '';
+    [ 'NKO', 'NFY', 'NRA' ];
 }
 
 sub admin_base_url {
-    return 'http://www.fiksgatami.no/admin/';
-}
-
-sub writetothem_url {
-    return 'http://www.norge.no/styresmakter/';
+    return 'http://www.fiksgatami.no/admin';
 }
 
 # If lat/lon are present in the URL, OpenLayers will use that to centre the map.
@@ -115,33 +100,26 @@ sub guess_road_operator {
     return '';
 }
 
-sub remove_redundant_councils {
+sub remove_redundant_areas {
     my $self = shift;
-    my $all_councils = shift;
+    my $all_areas = shift;
 
     # Oslo is both a kommune and a fylke, we only want to show it once
-    delete $all_councils->{301}     #
-        if $all_councils->{3};
-}
-
-sub filter_all_council_ids_list {
-    my $self = shift;
-    my @all_councils_ids = @_;
-
-    # as above we only want to show Oslo once
-    return grep { $_ != 301 } @all_councils_ids;
+    delete $all_areas->{301}
+        if $all_areas->{3};
 }
 
 sub short_name {
     my $self = shift;
     my ($area, $info) = @_;
 
-    if ($area->{name} =~ /^(Os|Nes|V\xe5ler|Sande|B\xf8|Her\xf8y)$/) {
+    my $name = $area->{name} || $area->name;
+
+    if ($name =~ /^(Os|Nes|V\xe5ler|Sande|B\xf8|Her\xf8y)$/) {
         my $parent = $info->{$area->{parent_area}}->{name};
-        return URI::Escape::uri_escape_utf8("$area->{name}, $parent");
+        return URI::Escape::uri_escape_utf8("$name, $parent");
     }
 
-    my $name = $area->{name};
     $name =~ s/ & / and /;
     $name = URI::Escape::uri_escape_utf8($name);
     $name =~ s/%20/+/g;
@@ -230,7 +208,7 @@ sub council_rss_alert_options {
 
 }
 
-sub reports_council_check {
+sub reports_body_check {
     my ( $self, $c, $council ) = @_;
 
     if ($council eq 'Oslo') {
@@ -243,9 +221,9 @@ sub reports_council_check {
 
         # Some kommunes have the same name, use the fylke name to work out which.
         my ($kommune, $fylke) = split /\s*,\s*/, $council;
-        my @area_types = $c->cobrand->area_types;
-        my $areas_k = mySociety::MaPit::call('areas', $kommune, type => \@area_types);
-        my $areas_f = mySociety::MaPit::call('areas', $fylke, type => \@area_types);
+        my $area_types = $c->cobrand->area_types;
+        my $areas_k = mySociety::MaPit::call('areas', $kommune, type => $area_types);
+        my $areas_f = mySociety::MaPit::call('areas', $fylke, type => $area_types);
         if (keys %$areas_f == 1) {
             ($fylke) = values %$areas_f;
             foreach (values %$areas_k) {

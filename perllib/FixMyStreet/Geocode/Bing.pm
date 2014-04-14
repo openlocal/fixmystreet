@@ -15,16 +15,23 @@ use File::Path ();
 use LWP::Simple;
 use Digest::MD5 qw(md5_hex);
 
+use mySociety::Locale;
+
 # string STRING CONTEXT
 # Looks up on Bing Maps API, and caches, a user-inputted location.
 # Returns array of (LAT, LON, ERROR), where ERROR is either undef, a string, or
 # an array of matches if there are more than one. The information in the query
 # may be used to disambiguate the location in cobranded versions of the site.
 sub string {
-    my ( $s, $c, $params ) = @_;
+    my ( $s, $c ) = @_;
+
+    my $params = $c->cobrand->disambiguate_location($s);
+
+    $s = FixMyStreet::Geocode::escape($s);
     $s .= '+' . $params->{town} if $params->{town} and $s !~ /$params->{town}/i;
+
     my $url = "http://dev.virtualearth.net/REST/v1/Locations?q=$s";
-    $url .= '&userMapView=' . $params->{bounds}[0] . ',' . $params->{bounds}[1]
+    $url .= '&userMapView=' . join(',', @{$params->{bounds}})
         if $params->{bounds};
     $url .= '&userLocation=' . $params->{centre} if $params->{centre};
     $url .= '&c=' . $params->{bing_culture} if $params->{bing_culture};
@@ -44,8 +51,6 @@ sub string {
 
     if (!$js) {
         return { error => _('Sorry, we could not parse that location. Please try again.') };
-    } elsif ($js =~ /BT\d/ && $params->{bing_country} eq 'United Kingdom') {
-        return { error => _("We do not currently cover Northern Ireland, I'm afraid.") };
     }
 
     $js = JSON->new->utf8->allow_nonref->decode($js);
@@ -58,7 +63,7 @@ sub string {
 
     foreach (@$results) {
         my $address = $_->{name};
-        next unless $_->{address}->{countryRegion} eq $params->{bing_country};
+        next if $params->{bing_country} && $_->{address}->{countryRegion} ne $params->{bing_country};
 
         # Getting duplicate, yet different, results from Bing sometimes
         next if @valid_locations
@@ -69,7 +74,14 @@ sub string {
                );
 
         ( $latitude, $longitude ) = @{ $_->{point}->{coordinates} };
-        push (@$error, { address => $address, latitude => $latitude, longitude => $longitude });
+        # These co-ordinates are output as query parameters in a URL, make sure they have a "."
+        mySociety::Locale::in_gb_locale {
+            push (@$error, {
+                address => $address,
+                latitude => sprintf('%0.6f', $latitude),
+                longitude => sprintf('%0.6f', $longitude)
+            });
+        };
         push (@valid_locations, $_);
     }
 

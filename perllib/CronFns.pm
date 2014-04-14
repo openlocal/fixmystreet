@@ -24,16 +24,19 @@ sub options {
     die "Either no arguments, --nomail or --verbose" if (@ARGV>1);
     my $nomail = 0;
     my $verbose = 0;
+    my $debug = 0;
     $nomail = 1 if (@ARGV==1 && $ARGV[0] eq '--nomail');
     $verbose = 1 if (@ARGV==1 && $ARGV[0] eq '--verbose');
+    $debug = 1 if (@ARGV==1 && $ARGV[0] eq '--debug');
     $verbose = 1 if $nomail;
-    return ($verbose, $nomail);
+    return ($verbose, $nomail, $debug);
 }
 
 sub site {
     my $base_url = shift;
     my $site = 'fixmystreet';
     $site = 'emptyhomes' if $base_url =~ 'emptyhomes';
+    $site = 'zurich' if $base_url =~ /zurich|zueri/;
     return $site;
 }
 

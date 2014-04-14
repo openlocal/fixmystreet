@@ -1,6 +1,6 @@
 [%
     PROCESS "maps/${map.type}.html" IF problems.size;
-    INCLUDE 'header.html', title = loc('Your Reports')
+    INCLUDE 'header.html', title = loc('Your Reports'), bodyclass = 'mappage'
 %]
 
 [% IF problems.size %]
@@ -12,6 +12,11 @@
 [% END %]
 
 <h1>[% loc('Your Reports') %]</h1>
+
+[% IF ! has_content %]
+[% tprintf( loc('You haven&rsquo;t created any reports yet.  <a href="%s">Report a problem now.</a>'),
+    c.uri_for('/') ) %]
+[% END %]
 
 [% INCLUDE 'pagination.html',
     pager = problems_pager,
@@ -47,13 +52,13 @@ END %]
             pager = updates_pager,
             param = 'u'
         %]
-        <ul>
+        <ul class="issue-list full-width">
     [% END %]
 
     <li>&ldquo;[% u.text | html %]&rdquo;
     &ndash; <a href="[% c.uri_for( '/report', u.problem_id ) %]#update_[% u.id %]">[% u.problem.title | html %]</a>.
     <em class="council_sent_info">
-        [% tprintf( loc("Added %s"), prettify_epoch( u.confirmed_local.epoch, 'date' ) ) %]
+        [% tprintf( loc("Added %s"), prettify_dt( u.confirmed, 'date' ) ) %]
         </em>
     </li>
     [% "</ul>" IF loop.last %]
@@ -64,14 +69,14 @@ END %]
 [% INCLUDE 'footer.html' %]
 
 [% BLOCK problem %]
-    [% "<ul>" IF loop.first %]
+    [% "<ul class='issue-list-a full-width'>" IF loop.first %]
 
     <li><a href="[% c.uri_for( '/report', p.id ) %]">[% p.title | html %]</a>
     <em class="council_sent_info"> &ndash;
         [% IF p.whensent %]
-            [% tprintf( loc("Reported %s, to %s"), prettify_epoch( p.confirmed_local.epoch, 'date' ), p.body(c) ) %]
+            [% tprintf( loc("Reported %s, to %s"), prettify_dt( p.confirmed, 'date' ), p.body(c) ) %]
         [% ELSE %]
-            [% tprintf( loc("Reported %s"), prettify_epoch( p.confirmed_local.epoch, 'date' ) ) %]
+            [% tprintf( loc("Reported %s"), prettify_dt( p.confirmed, 'date' ) ) %]
         [% END %]
         </em>
     </li>

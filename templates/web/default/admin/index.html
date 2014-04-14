@@ -1,5 +1,13 @@
 [% INCLUDE 'admin/header.html' title=loc('Summary') -%]
 
+[% IF total_bodies == 0 %]
+  <p class="fms-admin-info">
+    [% loc('Currently no bodies have been created.') %]
+    <br>
+    [% tprintf( loc('You need to <a href="%s">add some bodies</a> (such as councils or departments) before any reports can be sent.'), c.uri_for('bodies')) %]
+  </p>
+[% END %]
+
 [%- BLOCK states -%]
 <h2>[% title %]</h2>
 
@@ -21,7 +29,7 @@
 
 [% IF c.cobrand.admin_show_creation_graph -%]
     <p>
-        <a href="[% c.config.BASE_URL %]/bci-live-creation.png">[% loc('Graph of problem creation by status over time') %]</a>
+        <a href="[% c.config.BASE_URL %]/fms-live-creation.png" class="admin-offsite-link">[% loc('Graph of problem creation by status over time') %]</a>
     </p>
 [% END -%]
 

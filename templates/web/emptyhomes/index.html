@@ -1,70 +1,57 @@
-[% INCLUDE 'header.html', title => '' %]
+[% INCLUDE 'header.html', title = '' %]
 
-[% IF c.req.uri.host == 'reportemptyhomes.com' or c.req.uri.host == 'emptyhomes.matthew.fixmystreet.com' %]
+<div class="grid-50">
+    <h1 class="bl">
+        <small>[% loc('Report, view, or discuss local problems') %]</small>
+    </h1>
 
-<h2>Channel 4: The Great British Property Scandal</h2>
+    [% IF error %]
+        <p class="error">[% error %]</p>
+    [% END %]
 
-<div class="video"><object id="flashObj" width="480" height="270" classid="clsid:D27CDB6E-AE6D-11cf-96B8-444553540000" codebase="http://download.macromedia.com/pub/shockwave/cabs/flash/swflash.cab#version=9,0,47,0"><param name="movie" value="http://c.brightcove.com/services/viewer/federated_f9?isVid=1&isUI=1" /><param name="bgcolor" value="#FFFFFF" /><param name="flashVars" value="@videoPlayer=1293919404001&playerID=1242807532001&playerKey=AQ~~,AAABIWs5YNk~,K8Yb_Dc0PlMA8gCUiCBbnEcXR1bU7HRm&domain=embed&dynamicStreaming=true" /><param name="base" value="http://admin.brightcove.com" /><param name="seamlesstabbing" value="false" /><param name="allowFullScreen" value="true" /><param name="swLiveConnect" value="true" /><param name="allowScriptAccess" value="always" /><embed src="http://c.brightcove.com/services/viewer/federated_f9?isVid=1&isUI=1" bgcolor="#FFFFFF" flashVars="@videoPlayer=1293919404001&playerID=1242807532001&playerKey=AQ~~,AAABIWs5YNk~,K8Yb_Dc0PlMA8gCUiCBbnEcXR1bU7HRm&domain=embed&dynamicStreaming=true" base="http://admin.brightcove.com" name="flashObj" width="480" height="270" seamlesstabbing="false" type="application/x-shockwave-flash" allowFullScreen="true" allowScriptAccess="always" swLiveConnect="true" pluginspage="http://www.macromedia.com/shockwave/download/index.cgi?P1_Prod_Version=ShockwaveFlash"></embed></object></div>
+    [% PROCESS 'around/postcode_form.html' %]
 
-<p>
-Empty Homes were offical advisors to the recent empty homes TV series <strong>The Great British Property Scandal</strong>!
-</p>
+    <div class="grid-50">
+        [% INCLUDE 'front/stats.html' %]
+    </div>
 
-<p>
-The series highlighted the nearly two million British families who don’t have adequate housing, and the million-odd homes lying empty across the UK.
-</p>
-
-<p>
-The TV series launched a campaign for action and while this is running, our <a href="[% uri => '/' %]">www.reportemptyhomes.com</a> website has been merged with the campaign's reporting system so that all reports are gathered together and sent on to the local councils. Please use these links to report empty properties which you know of:
-</p>
-
-<ul class="channel4">
-
-<li><a href="http://www.channel4.com/programmes/the-great-british-property-scandal/articles/report-an-empty">Report an empty property</a></li>
-<li><a href="http://cy.reportemptyhomes.com/">Rhoi gwybod am eiddo gwag</a></li>
-
-<li><a href="http://itunes.apple.com/gb/app/empty-homes-spotter/id482550587?mt=8"><img src="/i/appstore.png" hspace="5" alt="" align="right">Download the iPhone app</a> from the App Store.</li>
-
-</ul>
-
-[% ELSE %]
-
-[% IF error %]
-    <p class="error">[% error %]</p>
-[% END %]
-
-<p id="expl">        
-    <strong>[% loc('Report empty properties') %]</strong>
-</p>
-
-[%
-    question
-        =  c.cobrand.enter_postcode_text()
-        || loc("Enter a nearby GB postcode, or street name and area");
+[% 
+    recent_photos = c.cobrand.recent_photos('front', 2);
+    probs         = c.cobrand.recent();
 %]
-
-<form action="[% c.uri_for('/around') %]" method="get" name="postcodeForm" id="postcodeForm">
-    <label for="pc">[% question %]:</label>
-    <span><input type="text" name="pc" value="" id="pc" size="10" maxlength="200">
-    <input type="submit" value="[% loc('Go') %]" id="submit">
-    </span>
-</form>
-
-<div id="front_intro">
-
-    <h2>[% loc('How to report a problem') %]</h2>
-    
-    <ol>
-        <li>[% question %]</li>
-        <li>[% loc('Locate the problem on a map of the area') %]</li>
-        <li>[% loc('Enter details of the problem') %]</li>
-        <li>[% loc('We send it to the council on your behalf') %]</li>
-    </ol>
-    
-    [% INCLUDE "front/stats.html" %]
+[% IF probs.size %]
+    <div class="grid-50">
+        <h2 class="bl"><small>[% loc('Recently reported problems') %]</small></h2>
+        <ul id="nearby_lists">
+        [% FOREACH p IN probs %]
+            <li>
+                <a href="/report/[% p.id %]">[% p.title | html %]</a>
+                <small>[% prettify_dt( p.confirmed, 1 ) %]</small>
+            </li>
+        [% END %]
+        </ul>
+    </div>
+[% END %]
 
 </div>
 
-[% END %]
+<div class="grid-50">
+    <div id="eha_steps">
+    [% INCLUDE 'index-steps.html',
+        question = c.cobrand.enter_postcode_text %]
+    </div>
+
+    [% IF recent_photos.size %]
+        <p id="front_photos">
+        [% FOREACH p IN recent_photos;
+            photo = p.get_photo_params;
+        %]
+            <a href="/report/[% p.id %]"><img border="0" height="100"
+                src="[% photo.url_tn %]" alt="[% p.title | html %]" title="[% p.title | html %]"></a>
+        [% END %]
+        </p>
+    [% END %]
+
+</div>
 
 [% INCLUDE 'footer.html' %]

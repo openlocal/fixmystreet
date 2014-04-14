@@ -8,6 +8,7 @@ sub nearby {
     my ( $rs, $c, $dist, $ids, $limit, $mid_lat, $mid_lon, $interval ) = @_;
 
     my $params = {
+        non_public => 0,
         state => [ FixMyStreet::DB::Result::Problem::visible_states() ],
     };
     $params->{'current_timestamp-lastupdate'} = { '<', \"'$interval'::interval" }
@@ -20,12 +21,7 @@ sub nearby {
     } if $c->cobrand->problems_clause;
 
     my $attrs = {
-        join => 'problem',
-        columns => [
-            'problem.id', 'problem.title', 'problem.latitude',
-            'problem.longitude', 'distance', 'problem.state',
-            'problem.confirmed', { 'problem.photo' => 'problem.photo is not null' },
-        ],
+        prefetch => 'problem',
         bind => [ $mid_lat, $mid_lon, $dist ],
         order_by => [ 'distance', { -desc => 'created' } ],
         rows => $limit,

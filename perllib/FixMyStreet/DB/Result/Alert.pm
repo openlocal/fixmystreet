@@ -1,3 +1,4 @@
+use utf8;
 package FixMyStreet::DB::Result::Alert;
 
 # Created by DBIx::Class::Schema::Loader
@@ -7,7 +8,6 @@ use strict;
 use warnings;
 
 use base 'DBIx::Class::Core';
-
 __PACKAGE__->load_components("FilterColumn", "InflateColumn::DateTime", "EncodedColumn");
 __PACKAGE__->table("alert");
 __PACKAGE__->add_columns(
@@ -24,6 +24,8 @@ __PACKAGE__->add_columns(
   { data_type => "text", is_nullable => 1 },
   "parameter2",
   { data_type => "text", is_nullable => 1 },
+  "user_id",
+  { data_type => "integer", is_foreign_key => 1, is_nullable => 0 },
   "confirmed",
   { data_type => "integer", default_value => 0, is_nullable => 0 },
   "lang",
@@ -40,32 +42,30 @@ __PACKAGE__->add_columns(
   },
   "whendisabled",
   { data_type => "timestamp", is_nullable => 1 },
-  "user_id",
-  { data_type => "integer", is_foreign_key => 1, is_nullable => 0 },
 );
 __PACKAGE__->set_primary_key("id");
 __PACKAGE__->belongs_to(
   "alert_type",
   "FixMyStreet::DB::Result::AlertType",
   { ref => "alert_type" },
-  { is_deferrable => 1, on_delete => "CASCADE", on_update => "CASCADE" },
+  { is_deferrable => 0, on_delete => "NO ACTION", on_update => "NO ACTION" },
+);
+__PACKAGE__->has_many(
+  "alerts_sent",
+  "FixMyStreet::DB::Result::AlertSent",
+  { "foreign.alert_id" => "self.id" },
+  { cascade_copy => 0, cascade_delete => 0 },
 );
 __PACKAGE__->belongs_to(
   "user",
   "FixMyStreet::DB::Result::User",
   { id => "user_id" },
-  { is_deferrable => 1, on_delete => "CASCADE", on_update => "CASCADE" },
-);
-__PACKAGE__->has_many(
-  "alert_sents",
-  "FixMyStreet::DB::Result::AlertSent",
-  { "foreign.alert_id" => "self.id" },
-  { cascade_copy => 0, cascade_delete => 0 },
+  { is_deferrable => 0, on_delete => "NO ACTION", on_update => "NO ACTION" },
 );
 
 
-# Created by DBIx::Class::Schema::Loader v0.07010 @ 2011-06-23 15:49:48
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:d2TrE9UIZdXu3eXYJH0Zmw
+# Created by DBIx::Class::Schema::Loader v0.07035 @ 2013-09-10 17:11:54
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:d9yIFiTGtbtFaULXZNKstQ
 
 # You can replace this text with custom code or comments, and it will be preserved on regeneration
 
@@ -77,22 +77,21 @@ with 'FixMyStreet::Roles::Abuser';
 
 my $tz = DateTime::TimeZone->new( name => "local" );
 
+my $tz_f;
+$tz_f = DateTime::TimeZone->new( name => FixMyStreet->config('TIME_ZONE') )
+    if FixMyStreet->config('TIME_ZONE');
 
-sub whensubscribed_local {
-    my $self = shift;
+my $stz = sub {
+    my ( $orig, $self ) = ( shift, shift );
+    my $s = $self->$orig(@_);
+    return $s unless $s && UNIVERSAL::isa($s, "DateTime");
+    $s->set_time_zone($tz);
+    $s->set_time_zone($tz_f) if $tz_f;
+    return $s;
+};
 
-    return $self->whensubscribed
-      ? $self->whensubscribed->set_time_zone($tz)
-      : $self->whensubscribed;
-}
-
-sub whendisabled_local {
-    my $self = shift;
-
-    return $self->whendisabled
-      ? $self->whendisabled->set_time_zone($tz)
-      : $self->whendisabled;
-}
+around whensubscribed => $stz;
+around whendisabled => $stz;
 
 =head2 confirm
 

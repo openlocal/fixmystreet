@@ -9,16 +9,14 @@ use FixMyStreet::TestMech;
 use DateTime;
 use mySociety::Locale;
 
+use Catalyst::Test 'FixMyStreet::App';
+
 my $mech = FixMyStreet::TestMech->new;
 
 mySociety::Locale::gettext_domain('FixMyStreet');
 
 FixMyStreet::Map::set_map_class();
-my $r = Catalyst::Request->new( { base => URI->new('/'), uri => URI->new('http://fixmystreet.com/test'), parameters => { bbox => '-7.6,49.7,-7.5,49.8' } } );
-
-my $c = FixMyStreet::App->new( {
-    request => $r,
-});
+my $c = ctx_request('http://fixmystreet.com/test?bbox=-7.6,49.7,-7.5,49.8');
 
 $mech->delete_user('test@example.com');
 my $user =
@@ -32,7 +30,7 @@ my $dt = DateTime->now();
 my $report = FixMyStreet::App->model('DB::Problem')->find_or_create(
     {
         postcode           => 'SW1A 1AA',
-        council            => '2504',
+        bodies_str         => '2504',
         areas              => ',105255,11806,11828,2247,2504,',
         category           => 'Other',
         title              => 'Test 2',
@@ -71,7 +69,23 @@ for my $test (
         colour => 'yellow',
     },
     {
+        state => 'duplicate', 
+        colour => 'yellow',
+    },
+    {
+        state => 'unable to fix', 
+        colour => 'yellow',
+    },
+    {
+        state => 'not responsible', 
+        colour => 'yellow',
+    },
+    {
         state => 'investigating', 
+        colour => 'yellow',
+    },
+    {
+        state => 'action scheduled', 
         colour => 'yellow',
     },
     {

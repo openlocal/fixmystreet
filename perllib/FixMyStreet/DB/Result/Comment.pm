@@ -1,3 +1,4 @@
+use utf8;
 package FixMyStreet::DB::Result::Comment;
 
 # Created by DBIx::Class::Schema::Loader
@@ -7,7 +8,6 @@ use strict;
 use warnings;
 
 use base 'DBIx::Class::Core';
-
 __PACKAGE__->load_components("FilterColumn", "InflateColumn::DateTime", "EncodedColumn");
 __PACKAGE__->table("comment");
 __PACKAGE__->add_columns(
@@ -20,6 +20,10 @@ __PACKAGE__->add_columns(
   },
   "problem_id",
   { data_type => "integer", is_foreign_key => 1, is_nullable => 0 },
+  "user_id",
+  { data_type => "integer", is_foreign_key => 1, is_nullable => 0 },
+  "anonymous",
+  { data_type => "boolean", is_nullable => 0 },
   "name",
   { data_type => "text", is_nullable => 1 },
   "website",
@@ -48,30 +52,41 @@ __PACKAGE__->add_columns(
   { data_type => "boolean", is_nullable => 0 },
   "mark_open",
   { data_type => "boolean", default_value => \"false", is_nullable => 0 },
-  "user_id",
-  { data_type => "integer", is_foreign_key => 1, is_nullable => 0 },
-  "anonymous",
-  { data_type => "boolean", is_nullable => 0 },
   "problem_state",
   { data_type => "text", is_nullable => 1 },
+  "external_id",
+  { data_type => "text", is_nullable => 1 },
+  "extra",
+  { data_type => "text", is_nullable => 1 },
+  "send_fail_count",
+  { data_type => "integer", default_value => 0, is_nullable => 0 },
+  "send_fail_reason",
+  { data_type => "text", is_nullable => 1 },
+  "send_fail_timestamp",
+  { data_type => "timestamp", is_nullable => 1 },
+  "whensent",
+  { data_type => "timestamp", is_nullable => 1 },
 );
 __PACKAGE__->set_primary_key("id");
-__PACKAGE__->belongs_to(
-  "user",
-  "FixMyStreet::DB::Result::User",
-  { id => "user_id" },
-  { is_deferrable => 1, on_delete => "CASCADE", on_update => "CASCADE" },
-);
 __PACKAGE__->belongs_to(
   "problem",
   "FixMyStreet::DB::Result::Problem",
   { id => "problem_id" },
-  { is_deferrable => 1, on_delete => "CASCADE", on_update => "CASCADE" },
+  { is_deferrable => 0, on_delete => "NO ACTION", on_update => "NO ACTION" },
+);
+__PACKAGE__->belongs_to(
+  "user",
+  "FixMyStreet::DB::Result::User",
+  { id => "user_id" },
+  { is_deferrable => 0, on_delete => "NO ACTION", on_update => "NO ACTION" },
 );
 
 
-# Created by DBIx::Class::Schema::Loader v0.07010 @ 2011-06-27 10:07:32
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:ilLn3dlagg5COdpZDmzrVQ
+# Created by DBIx::Class::Schema::Loader v0.07035 @ 2013-09-10 17:11:54
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:D/+UWcF7JO/EkCiJaAHUOw
+
+__PACKAGE__->load_components("+FixMyStreet::DB::RABXColumn");
+__PACKAGE__->rabx_column('extra');
 
 use DateTime::TimeZone;
 use Image::Size;
@@ -82,23 +97,21 @@ with 'FixMyStreet::Roles::Abuser';
 
 my $tz = DateTime::TimeZone->new( name => "local" );
 
-sub created_local {
-    my $self = shift;
+my $tz_f;
+$tz_f = DateTime::TimeZone->new( name => FixMyStreet->config('TIME_ZONE') )
+    if FixMyStreet->config('TIME_ZONE');
 
-    return $self->created
-      ? $self->created->set_time_zone($tz)
-      : $self->created;
-}
+my $stz = sub {
+    my ( $orig, $self ) = ( shift, shift );
+    my $s = $self->$orig(@_);
+    return $s unless $s && UNIVERSAL::isa($s, "DateTime");
+    $s->set_time_zone($tz);
+    $s->set_time_zone($tz_f) if $tz_f;
+    return $s;
+};
 
-sub confirmed_local {
-    my $self = shift;
-
-    # if confirmed is null then it doesn't get inflated so don't
-    # try and set the timezone
-    return $self->confirmed
-      ? $self->confirmed->set_time_zone($tz)
-      : $self->confirmed;
-}
+around created => $stz;
+around confirmed => $stz;
 
 # You can replace this text with custom code or comments, and it will be preserved on regeneration
 
@@ -112,6 +125,12 @@ sub check_for_errors {
 
     $errors{update} = _('Please enter a message')
       unless $self->text =~ m/\S/;
+
+    # Bromley Council custom character limit
+    if ( $self->text && $self->problem && $self->problem->bodies_str
+        && $self->problem->bodies_str eq '2482' && length($self->text) > 1750 ) {
+        $errors{update} = sprintf( _('Updates are limited to %s characters in length. Please shorten your update'), 1750 );
+    }
 
     return \%errors;
 }
@@ -142,8 +161,8 @@ sub get_photo_params {
 
 =head2 meta_problem_state
 
-Returns a string suitable for display in the update meta section. 
-Mostly removes the '- council/user' bit from fixed states
+Returns a string suitable for display lookup in the update meta section.
+Removes the '- council/user' bit from fixed states.
 
 =cut
 

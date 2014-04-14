@@ -48,6 +48,10 @@ sub send_questionnaires_period {
         my $cobrand = FixMyStreet::Cobrand->get_class_for_moniker($row->cobrand)->new();
         $cobrand->set_lang_and_domain($row->lang, 1);
 
+        # Not all cobrands send questionnaires
+        next unless $cobrand->send_questionnaires;
+        next if $row->is_from_abuser;
+
         # Cobranded and non-cobranded messages can share a database. In this case, the conf file 
         # should specify a vhost to send the reports for each cobrand, so that they don't get sent 
         # more than once if there are multiple vhosts running off the same database. The email_host
@@ -59,7 +63,9 @@ sub send_questionnaires_period {
             ($template = $period) =~ s/ //;
             $template = Utils::read_file( FixMyStreet->path_to( "templates/email/emptyhomes/" . $row->lang . "/questionnaire-$template.txt" )->stringify );
         } else {
-            $template = FixMyStreet->path_to( "templates", "email", $cobrand->moniker, "questionnaire.txt" )->stringify;
+            $template = FixMyStreet->path_to( "templates", "email", $cobrand->moniker, $row->lang, "questionnaire.txt" )->stringify;
+            $template = FixMyStreet->path_to( "templates", "email", $cobrand->moniker, "questionnaire.txt" )->stringify
+                unless -e $template;
             $template = FixMyStreet->path_to( "templates", "email", "default", "questionnaire.txt" )->stringify
                 unless -e $template;
             $template = Utils::read_file( $template );
@@ -82,11 +88,10 @@ sub send_questionnaires_period {
             scope => 'questionnaire',
             data  => $questionnaire->id,
         } );
-        $h{url} = $cobrand->base_url_for_emails($row->cobrand_data) . '/Q/' . $token->token;
+        $h{url} = $cobrand->base_url($row->cobrand_data) . '/Q/' . $token->token;
 
-        my $sender = $cobrand->contact_email;
+        my $sender = FixMyStreet->config('DO_NOT_REPLY_EMAIL');
         my $sender_name = _($cobrand->contact_name);
-        $sender =~ s/team/fms-DO-NOT-REPLY/;
 
         print "Sending questionnaire " . $questionnaire->id . ", problem "
             . $row->id . ", token " . $token->token . " to "

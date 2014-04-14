@@ -8,6 +8,12 @@ use FixMyStreet::App::Controller::Questionnaire;
 
 ok( my $mech = FixMyStreet::TestMech->new, 'Created mech object' );
 
+# Make sure there's no outstanding questionnaire emails to be sent
+FixMyStreet::App->model('DB::Questionnaire')->send_questionnaires( {
+    site => 'fixmystreet'
+} );
+$mech->clear_emails_ok;
+
 # create a test user and report
 $mech->delete_user('test@example.com');
 
@@ -24,7 +30,7 @@ my $sent_time = $sent->ymd . ' ' . $sent->hms;
 my $report = FixMyStreet::App->model('DB::Problem')->find_or_create(
     {
         postcode           => 'EH1 1BB',
-        council            => '2651',
+        bodies_str         => '2651',
         areas              => ',11808,135007,14419,134935,2651,20728,',
         category           => 'Street lighting',
         title              => 'Testing',
@@ -184,6 +190,25 @@ foreach my $test (
             # update => 'Dummy', Error for not setting this tested below
         },
     },
+    {
+        desc => 'Closed report, said fixed, reported before, no update, no further questionnaire',
+        problem_state => 'closed',
+        fields => {
+            been_fixed => 'Yes',
+            reported => 'Yes',
+            another => 'No',
+        },
+    },
+    {
+        desc => 'Closed report, said not fixed, reported before, no update, no further questionnaire',
+        problem_state => 'closed',
+        fields => {
+            been_fixed => 'No',
+            reported => 'Yes',
+            another => 'No',
+        },
+        lastupdate_static => 1,
+    },
 ) {
     subtest $test->{desc} => sub {
         $report->state ( $test->{problem_state} );
@@ -218,7 +243,8 @@ foreach my $test (
         $result = 'fixed'
           if $test->{fields}{been_fixed} eq 'Yes'
               && $test->{problem_state} eq 'fixed';
-        $result = 'confirmed' if $test->{fields}{been_fixed} eq 'No';
+        $result = 'confirmed' if $test->{fields}{been_fixed} eq 'No' && $test->{problem_state} ne 'closed';
+        $result = 'closed' if $test->{fields}{been_fixed} eq 'No' && $test->{problem_state} eq 'closed';
         $result = 'unknown'   if $test->{fields}{been_fixed} eq 'Unknown';
 
         my $another = 0;
@@ -228,10 +254,12 @@ foreach my $test (
         $mech->content_like( qr/<title>[^<]*Questionnaire/m );
         $mech->content_contains( 'glad to hear it&rsquo;s been fixed' )
             if $result =~ /fixed/;
+        $mech->content_lacks( 'glad to hear it&rsquo;s been fixed' )
+            if $result !~ /fixed/;
         $mech->content_contains( 'get some more information about the status of your problem' )
             if $result eq 'unknown';
         $mech->content_contains( "sorry to hear that" )
-            if $result eq 'confirmed';
+            if $result eq 'confirmed' || $result eq 'closed';
 
         # Check the database has the right information
         $report->discard_changes;
@@ -273,6 +301,23 @@ foreach my $test (
     };
 }
 
+my $comment = FixMyStreet::App->model('DB::Comment')->find_or_create(
+    {
+        problem_id => $report->id,
+        user_id    => $user->id,
+        name       => 'A User',
+        mark_fixed => 'false',
+        text       => 'This is some update text',
+        state      => 'confirmed',
+        confirmed  => $sent_time,
+        anonymous  => 'f',
+    }
+);
+subtest 'Check updates are shown correctly on questionnaire page' => sub {
+    $mech->get_ok("/Q/" . $token->token);
+    $mech->content_contains( 'updates that have been left' );
+    $mech->content_contains( 'This is some update text' );
+};
 
 for my $test ( 
     {
@@ -284,11 +329,27 @@ for my $test (
         fixed => 0
     },
     {
+        state => 'action scheduled',
+        fixed => 0
+    },
+    {
         state => 'in progress',
         fixed => 0
     },
     {
         state => 'investigating',
+        fixed => 0
+    },
+    {
+        state => 'duplicate',
+        fixed => 0
+    },
+    {
+        state => 'not responsible',
+        fixed => 0
+    },
+    {
+        state => 'unable to fix',
         fixed => 0
     },
     {
@@ -322,67 +383,78 @@ for my $test (
     };
 }
 
-# EHA extra checking
-ok $mech->host("reportemptyhomes.com"), 'change host to reportemptyhomes';
+FixMyStreet::override_config {
+    ALLOWED_COBRANDS => [ 'emptyhomes', 'fixmystreet' ],
+}, sub {
+    # EHA extra checking
+    ok $mech->host("reportemptyhomes.com"), 'change host to reportemptyhomes';
 
-# Reset, and all the questionaire sending function - FIXME should it detect site itself somehow?
-$report->send_questionnaire( 1 );
-$report->update;
-$questionnaire->delete;
-FixMyStreet::App->model('DB::Questionnaire')->send_questionnaires( {
-    site => 'emptyhomes'
-} );
-$email = $mech->get_email;
-ok $email, "got an email";
-$mech->clear_emails_ok;
+    # Reset, and all the questionaire sending function - FIXME should it detect site itself somehow?
+    $report->send_questionnaire( 1 );
+    $report->update;
+    $questionnaire->delete;
 
-like $email->body, qr/fill in this short questionnaire/i, "got questionnaire email";
-($token) = $email->body =~ m{http://.*?/Q/(\S+)};
-ok $token, "extracted questionnaire token '$token'";
+    FixMyStreet::App->model('DB::Questionnaire')->send_questionnaires( {
+        site => 'emptyhomes'
+    } );
+    $email = $mech->get_email;
+    ok $email, "got an email";
+    $mech->clear_emails_ok;
 
-$mech->get_ok("/Q/" . $token);
-$mech->content_contains( 'should have reported what they have done' );
+    (my $body = $email->body) =~ s/\s+/ /g;
+    like $body, qr/fill in this short questionnaire/i, "got questionnaire email";
+    ($token) = $email->body =~ m{http://.*?/Q/(\S+)};
+    ok $token, "extracted questionnaire token '$token'";
 
-# Test already answered the ever reported question, so not shown again
-$dt = $dt->add( weeks => 4 );
-my $questionnaire2 = FixMyStreet::App->model('DB::Questionnaire')->find_or_create(
-    {
-        problem_id => $report->id,
-        whensent => $dt->ymd . ' ' . $dt->hms,
-        ever_reported => 1,
-    }
-);
-ok $questionnaire2, 'added another questionnaire';
-ok $mech->host("fixmystreet.com"), 'change host to fixmystreet';
-$mech->get_ok("/Q/" . $token);
-$mech->title_like( qr/Questionnaire/ );
-$mech->content_contains( 'Has this problem been fixed?' );
-$mech->content_lacks( 'ever reported' );
+    $mech->get_ok("/Q/" . $token);
+    $mech->content_contains( 'should have reported what they have done' );
 
-# EHA extra checking
-ok $mech->host("reportemptyhomes.com"), 'change host to reportemptyhomes';
-$mech->get_ok("/Q/" . $token);
-$mech->content_contains( 'made a lot of progress' );
+    # Test already answered the ever reported question, so not shown again
+    $dt = $dt->add( weeks => 4 );
+    my $questionnaire2 = FixMyStreet::App->model('DB::Questionnaire')->find_or_create(
+        {
+            problem_id => $report->id,
+            whensent => $dt->ymd . ' ' . $dt->hms,
+            ever_reported => 1,
+        }
+    );
+    ok $questionnaire2, 'added another questionnaire';
+    ok $mech->host("fixmystreet.com"), 'change host to fixmystreet';
+    $mech->get_ok("/Q/" . $token);
+    $mech->title_like( qr/Questionnaire/ );
+    $mech->content_contains( 'Has this problem been fixed?' );
+    $mech->content_lacks( 'ever reported' );
 
-$token = FixMyStreet::App->model("DB::Token")->find( { scope => 'questionnaire', token => $token } );
-ok $token, 'found token for questionnaire';
-$questionnaire = FixMyStreet::App->model('DB::Questionnaire')->find( { id => $token->data } );
-ok $questionnaire, 'found questionnaire';
+    # EHA extra checking
+    ok $mech->host("reportemptyhomes.com"), 'change host to reportemptyhomes';
+    $mech->get_ok("/Q/" . $token);
+    $mech->content_contains( 'made a lot of progress' );
 
-# I18N Unicode extra testing using FiksGataMi
-$report->send_questionnaire( 1 );
-$report->cobrand( 'fiksgatami' );
-$report->update;
-$questionnaire->delete;
-$questionnaire2->delete;
-FixMyStreet::App->model('DB::Questionnaire')->send_questionnaires( { site => 'fixmystreet' } ); # It's either fixmystreet or emptyhomes
-$email = $mech->get_email;
-ok $email, "got an email";
-$mech->clear_emails_ok;
+    $token = FixMyStreet::App->model("DB::Token")->find( { scope => 'questionnaire', token => $token } );
+    ok $token, 'found token for questionnaire';
+    $questionnaire = FixMyStreet::App->model('DB::Questionnaire')->find( { id => $token->data } );
+    ok $questionnaire, 'found questionnaire';
 
-like $email->body, qr/Testing =96 Detail/, 'email contains encoded character from user';
-like $email->body, qr/sak p=E5 FiksGataMi/, 'email contains encoded character from template';
-is $email->header('Content-Type'), 'text/plain; charset="windows-1252"', 'email is in right encoding';
+    $questionnaire2->delete;
+};
+
+FixMyStreet::override_config {
+    ALLOWED_COBRANDS => [ 'fiksgatami' ],
+}, sub {
+    # I18N Unicode extra testing using FiksGataMi
+    $report->send_questionnaire( 1 );
+    $report->cobrand( 'fiksgatami' );
+    $report->update;
+    $questionnaire->delete;
+    FixMyStreet::App->model('DB::Questionnaire')->send_questionnaires( { site => 'fixmystreet' } ); # It's either fixmystreet or emptyhomes
+    $email = $mech->get_email;
+    ok $email, "got an email";
+    $mech->clear_emails_ok;
+
+    like $email->body, qr/Testing =96 Detail/, 'email contains encoded character from user';
+    like $email->body, qr/sak p=E5 FiksGataMi/, 'email contains encoded character from template';
+    is $email->header('Content-Type'), 'text/plain; charset="windows-1252"', 'email is in right encoding';
+};
 
 $mech->delete_user('test@example.com');
 done_testing();

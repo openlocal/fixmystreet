@@ -12,30 +12,12 @@
 package Utils;
 
 use strict;
+use DateTime;
 use Encode;
 use File::Slurp qw();
-use POSIX qw(strftime);
 use mySociety::DBHandle qw(dbh);
 use mySociety::GeoUtil;
 use mySociety::Locale;
-
-sub workaround_pg_bytea {
-    my ( $st, $img_idx, @elements ) = @_;
-    my $s = dbh()->prepare($st);
-    for ( my $i = 1 ; $i <= @elements ; $i++ ) {
-        if ( $i == $img_idx ) {
-            $s->bind_param(
-                $i,
-                $elements[ $i - 1 ],
-                { pg_type => DBD::Pg::PG_BYTEA }
-            );
-        }
-        else {
-            $s->bind_param( $i, $elements[ $i - 1 ] );
-        }
-    }
-    $s->execute();
-}
 
 =head2 convert_latlon_to_en
 
@@ -140,6 +122,35 @@ sub london_categories {
     };
 }
 
+sub barnet_categories {
+    # The values here are KBIDs from Barnet's system: see bin/send-reports for formatting 
+    if (mySociety::Config::get('STAGING_SITE')) { # note staging site must use different KBIDs
+        return {
+             'Street scene misc'        => 14 # for test
+        }
+    } else {
+        return {
+            'Accumulated Litter'        => 349,
+            'Dog Bin'                   => 203,
+            'Dog Fouling'               => 288,
+            'Drain or Gully'            => 256,
+            'Fly Posting'               => 465,
+            'Fly Tipping'               => 449,
+            'Graffiti'                  => 292,
+            'Gritting'                  => 200,
+            'Highways'                  => 186,
+            'Litter Bin Overflowing'    => 205,
+            'Manhole Cover'             => 417,
+            'Overhanging Foliage'       => 421,
+            'Pavement Damaged/Cracked'  => 195,
+            'Pothole'                   => 204,
+            'Road Sign'                 => 80,
+            'Roadworks'                 => 246,
+            'Street Lighting'           => 251,
+        };
+    }
+}
+
 =head2 trim_text
 
     my $text = trim_text( $text_to_trim );
@@ -210,26 +221,30 @@ sub cleanup_text {
     return $input;
 }
 
-sub prettify_epoch {
-    my ( $s, $type ) = @_;
+sub prettify_dt {
+    my ( $dt, $type ) = @_;
+    $type ||= '';
     $type = 'short' if $type eq '1';
 
-    my @s = localtime($s);
+    my $now = DateTime->now( time_zone => FixMyStreet->config('TIME_ZONE') || 'local' );
+
     my $tt = '';
-    $tt = strftime('%H:%M', @s) unless $type eq 'date';
-    my @t = localtime();
-    if (strftime('%Y%m%d', @s) eq strftime('%Y%m%d', @t)) {
+    $tt = $dt->strftime('%H:%M') unless $type eq 'date';
+
+    if ($dt->strftime('%Y%m%d') eq $now->strftime('%Y%m%d')) {
         return "$tt " . _('today');
     }
     $tt .= ', ' unless $type eq 'date';
-    if (strftime('%Y %U', @s) eq strftime('%Y %U', @t)) {
-        $tt .= decode_utf8(strftime('%A', @s));
+    if ($dt->strftime('%Y %U') eq $now->strftime('%Y %U')) {
+        $tt .= decode_utf8($dt->strftime('%A'));
+    } elsif ($type eq 'zurich') {
+        $tt .= decode_utf8($dt->strftime('%e. %B %Y'));
     } elsif ($type eq 'short') {
-        $tt .= decode_utf8(strftime('%e %b %Y', @s));
-    } elsif (strftime('%Y', @s) eq strftime('%Y', @t)) {
-        $tt .= decode_utf8(strftime('%A %e %B %Y', @s));
+        $tt .= decode_utf8($dt->strftime('%e %b %Y'));
+    } elsif ($dt->strftime('%Y') eq $now->strftime('%Y')) {
+        $tt .= decode_utf8($dt->strftime('%A %e %B %Y'));
     } else {
-        $tt .= decode_utf8(strftime('%a %e %B %Y', @s));
+        $tt .= decode_utf8($dt->strftime('%a %e %B %Y'));
     }
     return $tt;
 }
@@ -248,17 +263,27 @@ sub prettify_duration {
         return _('less than a minute') if $s == 0;
     }
     my @out = ();
-    _part(\$s, 60*60*24*7, _('%d week'), _('%d weeks'), \@out);
-    _part(\$s, 60*60*24, _('%d day'), _('%d days'), \@out);
-    _part(\$s, 60*60, _('%d hour'), _('%d hours'), \@out);
-    _part(\$s, 60, _('%d minute'), _('%d minutes'), \@out);
+    _part(\$s, 60*60*24*7, \@out);
+    _part(\$s, 60*60*24, \@out);
+    _part(\$s, 60*60, \@out);
+    _part(\$s, 60,  \@out);
     return join(', ', @out);
 }
 sub _part {
-    my ($s, $m, $w1, $w2, $o) = @_;
+    my ($s, $m, $o) = @_;
     if ($$s >= $m) {
         my $i = int($$s / $m);
-        push @$o, sprintf(mySociety::Locale::nget($w1, $w2, $i), $i);
+        my $str;
+        if ($m == 60*60*24*7) {
+            $str = mySociety::Locale::nget("%d week", "%d weeks", $i);
+        } elsif ($m == 60*60*24) {
+            $str = mySociety::Locale::nget("%d day", "%d days", $i);
+        } elsif ($m == 60*60) {
+            $str = mySociety::Locale::nget("%d hour", "%d hours", $i);
+        } elsif ($m == 60) {
+            $str = mySociety::Locale::nget("%d minute", "%d minutes", $i);
+        }
+        push @$o, sprintf($str, $i);
         $$s -= $i * $m;
     }
 }

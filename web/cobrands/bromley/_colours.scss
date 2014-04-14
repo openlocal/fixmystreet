@@ -1,8 +1,20 @@
 /* COLOURS */
 
-$primary: rgb(76,120,168);
+$bromley_blue: rgb(91,120,147);
+
+$primary: $bromley_blue;
 $primary_b: #000000;
 $primary_text: #ffffff;
 
-$contrast1: #00BD08;
-$contrast2: #AA8D11;
+$base_bg: #9b9b9b url('https://www.bromley.gov.uk/site/styles/css_img/repeater.gif') repeat-x;
+$base_fg: #1a1a1a;
+
+/* Unused here */
+$map_nav_bg: #222;
+$nav_fg: #fff;
+$nav_fg_hover: #444;
+
+$col_click_map: $bromley_blue;
+$col_click_map_dark: darken($bromley_blue, 10%);
+$col_fixed_label: $bromley_blue;
+$col_fixed_label_dark: darken($bromley_blue, 10%);

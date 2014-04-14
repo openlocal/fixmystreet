@@ -1,3 +1,4 @@
+use utf8;
 package FixMyStreet::DB::Result::Token;
 
 # Created by DBIx::Class::Schema::Loader
@@ -7,7 +8,6 @@ use strict;
 use warnings;
 
 use base 'DBIx::Class::Core';
-
 __PACKAGE__->load_components("FilterColumn", "InflateColumn::DateTime", "EncodedColumn");
 __PACKAGE__->table("token");
 __PACKAGE__->add_columns(
@@ -27,15 +27,13 @@ __PACKAGE__->add_columns(
 __PACKAGE__->set_primary_key("scope", "token");
 
 
-# Created by DBIx::Class::Schema::Loader v0.07010 @ 2011-06-23 15:49:48
-# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:frl+na3HrIzGw9D1t891nA
+# Created by DBIx::Class::Schema::Loader v0.07017 @ 2012-03-08 17:19:55
+# DO NOT MODIFY THIS OR ANYTHING ABOVE! md5sum:+LLZ8P5GXqPetuGyrra2vw
 
 # Trying not to use this
 # use mySociety::DBHandle qw(dbh);
 
 use mySociety::AuthToken;
-use IO::String;
-use RABX;
 
 =head1 NAME
 
@@ -54,25 +52,9 @@ ms_current_timestamp.
 
 =cut
 
-__PACKAGE__->filter_column(
-    data => {
-        filter_from_storage => sub {
-            my $self = shift;
-            my $ser  = shift;
-            return undef unless defined $ser;
-            my $h = new IO::String($ser);
-            return RABX::wire_rd($h);
-        },
-        filter_to_storage => sub {
-            my $self = shift;
-            my $data = shift;
-            my $ser  = '';
-            my $h    = new IO::String($ser);
-            RABX::wire_wr( $data, $h );
-            return $ser;
-        },
-    }
-);
+__PACKAGE__->load_components("+FixMyStreet::DB::RABXColumn");
+__PACKAGE__->rabx_column('data');
+
 
 sub new {
     my ( $class, $attrs ) = @_;

@@ -47,12 +47,35 @@ subtest "does pc, (x,y), (e,n) or (lat,lon) go to /around" => sub {
         $uri->query_form( $test->{in} );
 
         # get the uri and check for 302
-        $mech->get_ok($uri);
+        FixMyStreet::override_config {
+            MAPIT_URL => 'http://mapit.mysociety.org/',
+        }, sub {
+            $mech->get_ok($uri);
+        };
 
         # check that we are at /around
         is $mech->uri->path, '/around', "Got to /around";
         is_deeply { $mech->uri->query_form }, $test->{out}, "query correct";
     }
 };
+
+$mech->delete_problems_for_body( 2651 );
+
+my $problem_rs = FixMyStreet::App->model('DB::Problem');
+my $num = $problem_rs->count;
+
+my @edinburgh_problems = $mech->create_problems_for_body(5, 2651, 'Front page');
+is scalar @edinburgh_problems, 5, 'correct number of edinburgh problems created';
+
+$mech->get_ok('/report/' . $edinburgh_problems[2]->id);
+$mech->content_contains('Front page Test 3 for 2651', 'problem to be marked non public visible');
+is $problem_rs->count, $num+5;
+
+my $private = $edinburgh_problems[2];
+ok $private->update( { non_public => 1 } ), 'problem marked non public';
+
+ok $mech->get('/report/' . $edinburgh_problems[2]->id);
+is $mech->res->code, 403, 'page forbidden';
+is $problem_rs->count, $num+5;
 
 done_testing();

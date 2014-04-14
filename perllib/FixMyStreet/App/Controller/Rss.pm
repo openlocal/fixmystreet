@@ -106,10 +106,19 @@ sub local_problems_pc_distance : Path('pc') : Args(2) {
 
 }
 
-sub local_problems : LocalRegex('^(n|l)/([\d.-]+)[,/]([\d.-]+)(?:/(\d+))?$') {
+sub local_problems_dist : LocalRegex('^(n|l)/([\d.-]+)[,/]([\d.-]+)/(\d+)$') {
     my ( $self, $c ) = @_;
+    $c->forward( 'local_problems', $c->req->captures );
+}
 
-    my ( $type, $a, $b, $d) = @{ $c->req->captures };
+sub local_problems_no_dist : LocalRegex('^(n|l)/([\d.-]+)[,/]([\d.-]+)$') {
+    my ( $self, $c ) = @_;
+    $c->forward( 'local_problems', $c->req->captures );
+}
+
+sub local_problems : Private {
+    my ( $self, $c, $type, $a, $b, $d ) = @_;
+
     $c->forward( 'get_query_parameters', [ $d ] );
 
     $c->detach( 'redirect_lat_lon', [ $a, $b ] )
@@ -172,7 +181,6 @@ sub generate : Private {
     $c->stash->{rss} = new XML::RSS(
         version       => '2.0',
         encoding      => 'UTF-8',
-        stylesheet    => $c->cobrand->feed_xsl,
         encode_output => undef
     );
     $c->stash->{rss}->add_module(
@@ -205,14 +213,10 @@ sub query_main : Private {
     my ( $self, $c ) = @_;
     my $alert_type = $c->stash->{alert_type};
 
-    my ( $site_restriction, $site_id ) = $c->cobrand->site_restriction( $c->cobrand->extra_data );
-    # Only apply a site restriction if the alert uses the problem table
-    $site_restriction = '' unless $alert_type->item_table eq 'problem';
-
     # FIXME Do this in a nicer way at some point in the future...
     my $query = 'select * from ' . $alert_type->item_table . ' where '
         . ($alert_type->head_table ? $alert_type->head_table . '_id=? and ' : '')
-        . $alert_type->item_where . $site_restriction . ' order by '
+        . $alert_type->item_where . ' order by '
         . $alert_type->item_order;
     my $rss_limit = mySociety::Config::get('RSS_LIMIT');
     $query .= " limit $rss_limit" unless $c->stash->{type} =~ /^all/;
@@ -237,6 +241,15 @@ sub add_row : Private {
     $row->{name} = 'anonymous' if $row->{anonymous} || !$row->{name};
 
     my $pubDate;
+    if ($row->{created}) {
+        $row->{created} =~ /^(\d\d\d\d)-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)/;
+        $pubDate = mySociety::Locale::in_gb_locale {
+            strftime("%a, %d %b %Y %H:%M:%S %z", $6, $5, $4, $3, $2-1, $1-1900, -1, -1, 0)
+        };
+        $row->{created} = strftime("%e %B", $6, $5, $4, $3, $2-1, $1-1900, -1, -1, 0);
+        $row->{created} =~ s/^\s+//;
+        $row->{created} =~ s/^(\d+)/ordinal($1)/e if $c->stash->{lang_code} eq 'en-gb';
+    }
     if ($row->{confirmed}) {
         $row->{confirmed} =~ /^(\d\d\d\d)-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)/;
         $pubDate = mySociety::Locale::in_gb_locale {
@@ -250,12 +263,13 @@ sub add_row : Private {
     (my $title = _($alert_type->item_title)) =~ s/{{(.*?)}}/$row->{$1}/g;
     (my $link = $alert_type->item_link) =~ s/{{(.*?)}}/$row->{$1}/g;
     (my $desc = _($alert_type->item_description)) =~ s/{{(.*?)}}/$row->{$1}/g;
-    my $url = $c->uri_for( $link );
 
-    if ( $row->{postcode} ) {
-        my $pc = $c->cobrand->format_postcode( $row->{postcode} );
-        $title .= ", $pc";
+    my $hashref_restriction = $c->cobrand->site_restriction;
+    my $base_url = $c->cobrand->base_url;
+    if ( $hashref_restriction && $hashref_restriction->{bodies_str} && $row->{bodies_str} && $row->{bodies_str} ne $hashref_restriction->{bodies_str} ) {
+        $base_url = $c->config->{BASE_URL};
     }
+    my $url = $base_url . $link;
 
     my %item = (
         title => ent($title),
@@ -266,9 +280,9 @@ sub add_row : Private {
     $item{pubDate} = $pubDate if $pubDate;
     $item{category} = $row->{category} if $row->{category};
 
-    if ($c->cobrand->allow_photo_display && $row->{photo}) {
+    if ($c->cobrand->allow_photo_display($row) && $row->{photo}) {
         my $key = $alert_type->item_table eq 'comment' ? 'c/' : '';
-        $item{description} .= ent("\n<br><img src=\"". $c->cobrand->base_url . "/photo/$key$row->{id}.jpeg\">");
+        $item{description} .= ent("\n<br><img src=\"". $base_url . "/photo/$key$row->{id}.jpeg\">");
     }
 
     if ( $row->{used_map} ) {

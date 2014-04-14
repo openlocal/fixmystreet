@@ -45,10 +45,11 @@ sub my : Path : Args(0) {
     } )->page( $p_page );
 
     while ( my $problem = $rs->next ) {
+        $c->stash->{has_content}++;
         push @$pins, {
             latitude  => $problem->latitude,
             longitude => $problem->longitude,
-            colour    => $problem->is_fixed ? 'green' : 'red',
+            colour    => $c->cobrand->pin_colour( $problem, 'my' ),
             id        => $problem->id,
             title     => $problem->title,
         };
@@ -64,7 +65,9 @@ sub my : Path : Args(0) {
             order_by => { -desc => 'confirmed' },
             rows => 50
         } )->page( $u_page );
+
     my @updates = $rs->all;
+    $c->stash->{has_content} += scalar @updates;
     $c->stash->{updates} = \@updates;
     $c->stash->{updates_pager} = $rs->pager;
 

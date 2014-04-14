@@ -40,12 +40,13 @@ sub around_index : Path : Args(0) {
     my $partial_report = $c->forward('load_partial');
 
     # Try to create a location for whatever we have
-    return
-      unless $c->forward('/location/determine_location_from_coords')
-          || $c->forward('/location/determine_location_from_pc');
+    my $ret = $c->forward('/location/determine_location_from_coords')
+        || $c->forward('/location/determine_location_from_pc');
+    return unless $ret;
+    return $c->res->redirect('/') if $ret == -1 && !$partial_report;
 
-    # Check to see if the spot is covered by a council - if not show an error.
-    return unless $c->forward('check_location_is_acceptable');
+    # Check to see if the spot is covered by a area - if not show an error.
+    return unless $c->cobrand->moniker eq 'fixmybarangay' || $c->forward('check_location_is_acceptable');
 
     # If we have a partial - redirect to /report/new so that it can be
     # completed.
@@ -186,12 +187,13 @@ sub display_location : Private {
         @pins = map {
             # Here we might have a DB::Problem or a DB::Nearby, we always want the problem.
             my $p = (ref $_ eq 'FixMyStreet::App::Model::DB::Nearby') ? $_->problem : $_;
+            my $colour = $c->cobrand->pin_colour( $p, 'around' );
             {
                 latitude  => $p->latitude,
                 longitude => $p->longitude,
-                colour    => 'yellow', # $p->is_fixed ? 'green' : 'red',
+                colour    => $colour,
                 id        => $p->id,
-                title     => $p->title,
+                title     => $p->title_safe,
             }
         } @$on_map_all, @$around_map;
     }
@@ -203,6 +205,7 @@ sub display_location : Private {
         longitude => $short_longitude,
         clickable => 1,
         pins      => \@pins,
+        area      => $c->cobrand->areas_on_around,
     );
 
     return 1;
@@ -210,7 +213,7 @@ sub display_location : Private {
 
 =head2 check_location_is_acceptable
 
-Find the lat and lon in stash and check that they are acceptable to the council,
+Find the lat and lon in stash and check that they are acceptable to the area,
 and that they are in UK (if we are in UK).
 
 =cut
@@ -218,10 +221,10 @@ and that they are in UK (if we are in UK).
 sub check_location_is_acceptable : Private {
     my ( $self, $c ) = @_;
 
-    # check that there are councils that can accept this location
-    $c->stash->{council_check_action} = 'submit_problem';
-    $c->stash->{remove_redundant_councils} = 1;
-    return $c->forward('/council/load_and_check_councils');
+    # check that there are areas that can accept this location
+    $c->stash->{area_check_action} = 'submit_problem';
+    $c->stash->{remove_redundant_areas} = 1;
+    return $c->forward('/council/load_and_check_areas');
 }
 
 =head2 /ajax
@@ -277,6 +280,66 @@ sub ajax : Path('/ajax') {
     );
 
     $c->res->body($body);
+}
+
+
+sub location_autocomplete : Path('/ajax/geocode') {
+    my ( $self, $c ) = @_;
+    $c->res->content_type('application/json; charset=utf-8');
+    unless ( $c->req->param('term') ) {
+        $c->res->status(404);
+        $c->res->body('');
+        return;
+    }
+    # we want the match even if there's no ambiguity, so recommendation doesn't
+    # disappear when it's the last choice being offered in the autocomplete.
+    $c->stash->{allow_single_geocode_match_strings} = 1;
+    return $self->_geocode( $c, $c->req->param('term') );
+}
+
+sub location_lookup : Path('/ajax/lookup_location') {
+    my ( $self, $c ) = @_;
+    $c->res->content_type('application/json; charset=utf-8');
+    unless ( $c->req->param('term') ) {
+        $c->res->status(404);
+        $c->res->body('');
+        return;
+    }
+
+    return $self->_geocode( $c, $c->req->param('term') );
+}
+
+sub _geocode : Private {
+    my ( $self, $c, $term ) = @_;
+
+    my ( $lat, $long, $suggestions ) =
+        FixMyStreet::Geocode::lookup( $c->req->param('term'), $c );
+
+    my ($response, @addresses, @locations);
+
+    if ( $lat && $long ) {
+        $response = { latitude => $lat, longitude => $long };
+    } else {
+        if ( ref($suggestions) eq 'ARRAY' ) {
+            foreach (@$suggestions) {
+                push @addresses, decode_utf8($_->{address});
+		push @locations, { address => decode_utf8($_->{address}), lat => $_->{latitude}, long => $_->{longitude} };
+            }
+            $response = { suggestions => \@addresses, locations => \@locations };
+        } else {
+            $response = { error => $suggestions };
+        }
+    }
+
+    if ( $c->stash->{allow_single_geocode_match_strings} ) {
+        $response = \@addresses;
+    }
+
+    my $body = JSON->new->utf8(1)->encode(
+        $response
+    );
+    $c->res->body($body);
+
 }
 
 __PACKAGE__->meta->make_immutable;

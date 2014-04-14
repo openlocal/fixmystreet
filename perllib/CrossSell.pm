@@ -19,7 +19,6 @@ package CrossSell;
 
 use strict;
 use LWP::Simple qw($ua get);
-$ua->timeout(5);
 use URI::Escape;
 use mySociety::AuthToken;
 use mySociety::Web qw(ent);
@@ -143,6 +142,25 @@ details. You can unsubscribe at any time.</p>
 EOF
 }
 
+sub display_survey_link {
+    return <<EOF;
+<h1 style="padding-top:0.5em">User Survey</h1>
+<p>
+We're running a survey to help us understand who uses our sites. If you have 10-15 minutes to spare then we'd be grateful if you could <a href="http://questions.mysociety.org/S/fms/w/" target="_blank">take part</a>.
+</p>
+EOF
+}
+
+sub display_wtt_link {
+    return <<EOF;
+<h1 style="padding-top:0.5em">WriteToThem</h1>
+<p>
+Need to write to a politician? Try <a href="https://writetothem.com">WriteToThem</a> - great 
+for campaigns too.
+</p>
+EOF
+}
+
 # Not currently used, needs more explanation and testing; perhaps in future.
 sub display_gny_groups {
     my ($lon, $lat) = @_;
@@ -168,6 +186,8 @@ sub display_advert ($$;$%) {
     my ($c, $email, $name, %data) = @_;
 
     return '' unless $c->cobrand->moniker eq 'fixmystreet';
+
+    $ua->timeout(5);
 
     #if (defined $data{council} && $data{council} eq '2326') {
     #    my ($out, $ad) = display_hfyc_cheltenham_advert($email, $name);
@@ -200,6 +220,11 @@ sub display_advert ($$;$%) {
 #EOF
 
     #unless (defined $data{done_tms} && $data{done_tms}==1) {
+    $c->stash->{scratch} = 'advert=wtt';
+    return '<div style="margin: 0 5em; border-top: dotted 1px #666666;">'
+        . display_wtt_link()
+        . '</div>';
+
     $c->stash->{scratch} = 'advert=news';
     my $auth_signature = '';
     unless (defined $data{emailunvalidated} && $data{emailunvalidated}==1) {

@@ -51,9 +51,45 @@ sub display : Path('') : Args(1) {
         return $c->res->redirect( $c->uri_for($1), 301 );
     }
 
+    $c->forward( '_display', [ $id ] );
+}
+
+=head2 ajax
+
+Return JSON formatted details of a report
+
+=cut
+
+sub ajax : Path('ajax') : Args(1) {
+    my ( $self, $c, $id ) = @_;
+
+    $c->stash->{ajax} = 1;
+    $c->forward( '_display', [ $id ] );
+}
+
+sub _display : Private {
+    my ( $self, $c, $id ) = @_;
+
     $c->forward( 'load_problem_or_display_error', [ $id ] );
     $c->forward( 'load_updates' );
     $c->forward( 'format_problem_for_display' );
+}
+
+sub support : Path('support') : Args(0) {
+    my ( $self, $c ) = @_;
+
+    my $id = $c->req->param('id');
+
+    my $uri =
+        $id
+      ? $c->uri_for( '/report', $id )
+      : $c->uri_for('/');
+
+    if ( $id && $c->cobrand->can_support_problems && $c->user && $c->user->from_body ) {
+        $c->forward( 'load_problem_or_display_error', [ $id ] );
+        $c->stash->{problem}->update( { interest_count => \'interest_count +1' } );
+    }
+    $c->res->redirect( $uri );
 }
 
 sub load_problem_or_display_error : Private {
@@ -66,7 +102,7 @@ sub load_problem_or_display_error : Private {
       : $c->cobrand->problems->find( { id => $id } );
 
     # check that the problem is suitable to show.
-    if ( !$problem || $problem->state eq 'unconfirmed' || $problem->state eq 'partial' ) {
+    if ( !$problem || ($problem->state eq 'unconfirmed' && !$c->cobrand->show_unconfirmed_reports) || $problem->state eq 'partial' ) {
         $c->detach( '/page_error_404_not_found', [ _('Unknown problem ID') ] );
     }
     elsif ( $problem->state eq 'hidden' ) {
@@ -74,6 +110,13 @@ sub load_problem_or_display_error : Private {
             '/page_error_410_gone',
             [ _('That report has been removed from FixMyStreet.') ]    #
         );
+    } elsif ( $problem->non_public ) {
+        if ( !$c->user || $c->user->id != $problem->user->id ) {
+            $c->detach(
+                '/page_error_403_access_denied',
+                [ sprintf(_('That report cannot be viewed on %s.'), $c->cobrand->site_title) ]    #
+            );
+        }
     }
 
     $c->stash->{problem} = $problem;
@@ -115,8 +158,6 @@ sub format_problem_for_display : Private {
 
     my $problem = $c->stash->{problem};
 
-    $c->stash->{banner} = $c->cobrand->generate_problem_banner($problem);
-
     ( $c->stash->{short_latitude}, $c->stash->{short_longitude} ) =
       map { Utils::truncate_coordinate($_) }
       ( $problem->latitude, $problem->longitude );
@@ -125,7 +166,21 @@ sub format_problem_for_display : Private {
         $c->stash->{add_alert} = 1;
     }
 
+    $c->stash->{extra_name_info} = $problem->bodies_str && $problem->bodies_str eq '2482' ? 1 : 0;
+
     $c->forward('generate_map_tags');
+
+    if ( $c->stash->{ajax} ) {
+        $c->res->content_type('application/json; charset=utf-8');
+        my $content = JSON->new->utf8(1)->encode(
+            {
+                report => $c->cobrand->problem_as_hashref( $problem, $c ),
+                updates => $c->cobrand->updates_as_hashref( $problem, $c ),
+            }
+        );
+        $c->res->body( $content );
+        return 1;
+    }
 
     return 1;
 }
@@ -144,13 +199,42 @@ sub generate_map_tags : Private {
         ? [ {
             latitude  => $problem->latitude,
             longitude => $problem->longitude,
-            colour    => 'yellow',
+            colour    => $c->cobrand->pin_colour($problem, 'report'),
             type      => 'big',
           } ]
         : [],
     );
 
     return 1;
+}
+
+sub delete :Local :Args(1) {
+    my ( $self, $c, $id ) = @_;
+
+    $c->forward( 'load_problem_or_display_error', [ $id ] );
+    my $p = $c->stash->{problem};
+
+    my $uri = $c->uri_for( '/report', $id );
+
+    return $c->res->redirect($uri) unless $c->user_exists;
+
+    my $body = $c->user->obj->from_body;
+    return $c->res->redirect($uri) unless $body;
+
+    return $c->res->redirect($uri) unless $p->bodies->{$body->id};
+
+    $p->state('hidden');
+    $p->lastupdate( \'ms_current_timestamp()' );
+    $p->update;
+
+    $c->model('DB::AdminLog')->create( {
+        admin_user => $c->user->email,
+        object_type => 'problem',
+        action => 'state_change',
+        object_id => $id,
+    } );
+
+    return $c->res->redirect($uri);
 }
 
 __PACKAGE__->meta->make_immutable;

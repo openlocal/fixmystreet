@@ -6,32 +6,34 @@ use XML::Simple;
 use FixMyStreet::App;
 use Open311;
 
-has council_list => ( is => 'ro' );
+has bodies => ( is => 'ro' );
 has found_contacts => ( is => 'rw', default => sub { [] } );
+has verbose => ( is => 'ro', default => 0 );
 
-has _current_council => ( is => 'rw' );
+has _current_body => ( is => 'rw' );
 has _current_open311 => ( is => 'rw' );
 has _current_service => ( is => 'rw' );
 
-my $council_list = FixMyStreet::App->model('DB::Open311conf');
+my $bodies = FixMyStreet::App->model('DB::Body');
 
-sub process_councils {
+sub process_bodies {
     my $self = shift;
 
-    while ( my $council = $self->council_list->next ) {
-        next unless $council->endpoint;
-        $self->_current_council( $council );
-        $self->process_council;
+    while ( my $body = $self->bodies->next ) {
+        next unless $body->endpoint;
+        next unless lc($body->send_method) eq 'open311';
+        next if $body->jurisdiction =~ /^fixmybarangay_\w+$/; # FMB depts. not using service discovery yet
+        $self->_current_body( $body );
+        $self->process_body;
     }
 }
 
-sub process_council {
+sub process_body {
     my $self = shift;
-
     my $open311 = Open311->new(
-        endpoint => $self->_current_council->endpoint,
-        jurisdiction => $self->_current_council->jurisdiction,
-        api_key => $self->_current_council->api_key
+        endpoint => $self->_current_body->endpoint,
+        jurisdiction => $self->_current_body->jurisdiction,
+        api_key => $self->_current_body->api_key
     );
 
     $self->_current_open311( $open311 );
@@ -39,7 +41,11 @@ sub process_council {
 
     my $list = $open311->get_service_list;
     unless ( $list ) {
-        warn "ERROR: no service list found for " . $self->_current_council->area_id . "\n";
+        my $id = $self->_current_body->id;
+        my $mapit_url = mySociety::Config::get('MAPIT_URL');
+        my $areas = join( ",", keys %{$self->_current_body->areas} );
+        warn "Body $id for areas $areas - $mapit_url/areas/$areas.html - did not return a service list\n"
+            if $self->verbose >= 1;
         return;
     }
     $self->process_services( $list );
@@ -51,7 +57,7 @@ sub _check_endpoints {
     my $self = shift;
 
     # west berks end point not standard
-    if ( $self->_current_council->area_id == 2619 ) {
+    if ( $self->_current_body->areas->{2619} ) {
         $self->_current_open311->endpoints(
             {
                 services => 'Services',
@@ -67,7 +73,10 @@ sub process_services {
     my $list = shift;
 
     $self->found_contacts( [] );
-    foreach my $service ( @{ $list->{service} } ) {
+    my $services = $list->{service};
+    # XML might only have one result and then squashed the 'array'-ness
+    $services = [ $services ] unless ref $services eq 'ARRAY';
+    foreach my $service ( @$services ) {
         $self->_current_service( $service );
         $self->process_service;
     }
@@ -77,14 +86,14 @@ sub process_services {
 sub process_service {
     my $self = shift;
 
-    my $category = $self->_current_council->area_id == 2218 ? 
-                    $self->_current_service->{description} : 
+    my $category = $self->_current_body->areas->{2218} ?
+                    $self->_current_service->{description} :
                     $self->_current_service->{service_name};
 
-    print $self->_current_service->{service_code} . ': ' . $category .  "\n";
+    print $self->_current_service->{service_code} . ': ' . $category .  "\n" if $self->verbose >= 2;
     my $contacts = FixMyStreet::App->model( 'DB::Contact')->search(
         {
-            area_id => $self->_current_council->area_id,
+            body_id => $self->_current_body->id,
             -OR => [
                 email => $self->_current_service->{service_code},
                 category => $category,
@@ -121,7 +130,7 @@ sub _handle_existing_contact {
 
     my $service_name = $self->_normalize_service_name;
 
-    print $self->_current_council->area_id . " already has a contact for service code " . $self->_current_service->{service_code} . "\n";
+    print $self->_current_body->id . " already has a contact for service code " . $self->_current_service->{service_code} . "\n" if $self->verbose >= 2;
 
     if ( $contact->deleted || $service_name ne $contact->category || $self->_current_service->{service_code} ne $contact->email ) {
         eval {
@@ -139,9 +148,16 @@ sub _handle_existing_contact {
         };
 
         if ( $@ ) {
-            warn "Failed to update contact for service code " . $self->_current_service->{service_code} . " for council @{[$self->_current_council->area_id]}: $@\n";
+            warn "Failed to update contact for service code " . $self->_current_service->{service_code} . " for body @{[$self->_current_body->id]}: $@\n"
+                if $self->verbose >= 1;
             return;
         }
+    }
+
+    if ( $contact and lc( $self->_current_service->{metadata} ) eq 'true' ) {
+        $self->_add_meta_to_contact( $contact );
+    } elsif ( $contact and $contact->extra and lc( $self->_current_service->{metadata} ) eq 'false' ) {
+        $contact->update( { extra => undef } );
     }
 
     push @{ $self->found_contacts }, $self->_current_service->{service_code};
@@ -157,7 +173,7 @@ sub _create_contact {
         $contact = FixMyStreet::App->model( 'DB::Contact')->create(
             {
                 email => $self->_current_service->{service_code},
-                area_id => $self->_current_council->area_id,
+                body_id => $self->_current_body->id,
                 category => $service_name,
                 confirmed => 1,
                 deleted => 0,
@@ -169,7 +185,8 @@ sub _create_contact {
     };
 
     if ( $@ ) {
-        warn "Failed to create contact for service code " . $self->_current_service->{service_code} . " for council @{[$self->_current_council->area_id]}: $@\n";
+        warn "Failed to create contact for service code " . $self->_current_service->{service_code} . " for body @{[$self->_current_body->id]}: $@\n"
+            if $self->verbose >= 1;
         return;
     }
 
@@ -179,15 +196,29 @@ sub _create_contact {
 
     if ( $contact ) {
         push @{ $self->found_contacts }, $self->_current_service->{service_code};
-        print "created contact for service code " . $self->_current_service->{service_code} . " for council @{[$self->_current_council->area_id]}\n";
+        print "created contact for service code " . $self->_current_service->{service_code} . " for body @{[$self->_current_body->id]}\n" if $self->verbose >= 2;
     }
 }
 
-sub _add_contact_to_meta {
+sub _add_meta_to_contact {
     my ( $self, $contact ) = @_;
 
-    print "Fetching meta data for $self->_current_service->{service_code}\n";
+    print "Fetching meta data for $self->_current_service->{service_code}\n" if $self->verbose >= 2;
     my $meta_data = $self->_current_open311->get_service_meta_info( $self->_current_service->{service_code} );
+
+    if ( ref $meta_data->{ attributes }->{ attribute } eq 'HASH' ) {
+        $meta_data->{ attributes }->{ attribute } = [
+            $meta_data->{ attributes }->{ attribute }
+        ];
+    }
+
+    if ( ! $meta_data->{attributes}->{attribute} ) {
+        warn sprintf( "Empty meta data for %s at %s",
+                      $self->_current_service->{service_code},
+                      $self->_current_body->endpoint )
+        if $self->verbose;
+        return;
+    }
 
     # turn the data into something a bit more friendly to use
     my @meta =
@@ -197,7 +228,31 @@ sub _add_contact_to_meta {
         sort { $a->{order} <=> $b->{order} }
         @{ $meta_data->{attributes}->{attribute} };
 
-    $contact->extra( \@meta );
+    # we add these later on from bromley so don't list them here
+    # as we don't want to display them
+    if ( $self->_current_body->areas->{2482} ) {
+        my %ignore = map { $_ => 1 } qw/
+            service_request_id_ext
+            requested_datetime
+            report_url
+            title
+            last_name
+            email
+            easting
+            northing
+            report_title
+            public_anonymity_required
+            email_alerts_requested
+        /;
+
+        @meta = grep { ! $ignore{ $_->{ code } } } @meta;
+    }
+
+    if ( @meta ) {
+        $contact->extra( \@meta );
+    } else {
+        $contact->extra( undef );
+    }
     $contact->update;
 }
 
@@ -206,8 +261,8 @@ sub _normalize_service_name {
 
     # FIXME - at the moment it makes more sense to use the description
     # for cambridgeshire but need a more flexible way to set this
-    my $service_name = $self->_current_council->area_id == 2218 ? 
-                        $self->_current_service->{description} : 
+    my $service_name = $self->_current_body->areas->{2218} ?
+                        $self->_current_service->{description} :
                         $self->_current_service->{service_name};
     # remove trailing whitespace as it upsets db queries
     # to look up contact details when creating problem
@@ -222,7 +277,7 @@ sub _delete_contacts_not_in_service_list {
     my $found_contacts = FixMyStreet::App->model( 'DB::Contact')->search(
         {
             email => { -not_in => $self->found_contacts },
-            area_id => $self->_current_council->area_id,
+            body_id => $self->_current_body->id,
             deleted => 0,
         }
     );

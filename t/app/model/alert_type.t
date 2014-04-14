@@ -22,6 +22,10 @@ my $user2 =
   ->find_or_create( { email => 'commenter@example.com', name => 'Commenter' } );
 ok $user2, "created comment user";
 
+my $user3 =
+  FixMyStreet::App->model('DB::User')
+  ->find_or_create( { email => 'bystander@example.com', name => 'Bystander' } );
+ok $user3, "created bystander";
 
 my $dt = DateTime->new(
     year   => 2011,
@@ -35,7 +39,7 @@ my $dt = DateTime->new(
 my $report = FixMyStreet::App->model('DB::Problem')->find_or_create(
     {
         postcode           => 'SW1A 1AA',
-        council            => '2504',
+        bodies_str         => '2504',
         areas              => ',105255,11806,11828,2247,2504,',
         category           => 'Other',
         title              => 'Test 2',
@@ -93,6 +97,18 @@ my $alert = FixMyStreet::App->model('DB::Alert')->find_or_create(
         alert_type => 'new_updates',
         whensubscribed => $dt->ymd . ' ' . $dt->hms,
         confirmed => 1,
+        cobrand => 'default',
+    }
+);
+
+my $alert3 = FixMyStreet::App->model('DB::Alert')->find_or_create(
+    {
+        user => $user3,
+        parameter => $report_id,
+        alert_type => 'new_updates',
+        whensubscribed => $dt->ymd . ' ' . $dt->hms,
+        confirmed => 1,
+        cobrand => 'default',
     }
 );
 
@@ -115,7 +131,7 @@ for my $test (
 
         my $sent = FixMyStreet::App->model('DB::AlertSent')->search(
             {
-                alert_id => $alert->id,
+                alert_id => [ $alert->id, $alert3->id ],
                 parameter => $comment->id,
             }
         )->delete;
@@ -125,18 +141,25 @@ for my $test (
 
         FixMyStreet::App->model('DB::AlertType')->email_alerts();
 
-        $mech->email_count_is( 1 );
-        my $email = $mech->get_email;
+        $mech->email_count_is( 2 );
+        my @emails = $mech->get_email;
         my $msg = $test->{msg};
-        my $body = $email->body;
+        for my $email (@emails) {
+            my $body = $email->body;
+            my $to = $email->header('To');
 
-        like $body, qr/$msg/, 'email says problem is ' . $test->{state};
-        like $body, qr{report/$report_id}, 'contains problem url';
-        like $body, qr/This is some update text/, 'contains update text';
-        unlike $body, qr/This is other update text/, 'does not contains other update text';
+            like $body, qr/$msg/, 'email says problem is ' . $test->{state};
+            if ($to eq $user->email) {
+                like $body, qr{/M/}, 'contains problem login url';
+            } elsif ($to eq $user3->email) {
+                like $body, qr{/report/$report_id}, 'contains problem url';
+            }
+            like $body, qr/This is some update text/, 'contains update text';
+            unlike $body, qr/This is other update text/, 'does not contains other update text';
 
-        my $comments = $body =~ s/(------)//gs;
-        is $comments, 1, 'only 1 update';
+            my $comments = $body =~ s/(------)//gs;
+            is $comments, 1, 'only 1 update';
+        }
     };
 }
 
@@ -155,59 +178,27 @@ my $council_alert = FixMyStreet::App->model('DB::Alert')->find_or_create(
     }
 );
 
-for my $test (
-    {
-        postcode           => 'SW1A 1AA',
-        expected_postcode  => 'SW1A 1AA',
-    },
-    {
-        postcode           => 'sw1a 1AA',
-        expected_postcode  => 'SW1A 1AA',
-    },
-    {
-        postcode           => 'SW1A 1aa',
-        expected_postcode  => 'SW1A 1AA',
-    },
-    {
-        postcode           => 'SW1A1AA',
-        expected_postcode  => 'SW1A 1AA',
-    },  
-    {
-        postcode           => 'Buckingham Gate',
-        expected_postcode  => 'Buckingham\s+Gate',
-    },  
-    {
-        postcode           => 'Buckingham gate',
-        expected_postcode  => 'Buckingham\s+gate',
-    },  
-) {
-    subtest "correct text for postcode $test->{postcode}" => sub {
-        $mech->clear_emails_ok;
+subtest "correct text for title after URL" => sub {
+    $mech->clear_emails_ok;
 
-        my $sent = FixMyStreet::App->model('DB::AlertSent')->search(
-            {
-                alert_id => $council_alert->id,
-                parameter => $report->id,
-            }
-        )->delete;
-
-        $report->postcode( $test->{postcode} );
-        $report->update;
-
+    my $sent = FixMyStreet::App->model('DB::AlertSent')->search(
+        {
+            alert_id => $council_alert->id,
+            parameter => $report->id,
+        }
+    )->delete;
+    FixMyStreet::override_config {
+        MAPIT_URL => 'http://mapit.mysociety.org/',
+    }, sub {
         FixMyStreet::App->model('DB::AlertType')->email_alerts();
-
-        $mech->email_count_is( 1 );
-        my $email = $mech->get_email;
-        my $pc = $test->{expected_postcode};
-        (my $title = $report->title) =~ s/ /\\s+/;
-        my $body = $email->body;
-
-        like $body, qr#report/$report_id - $title, $pc#, 'email contains expected postcode';
     };
-}
 
-$report->postcode( 'SW1A 1AA' );
-$report->update;
+    my $email = $mech->get_email;
+    (my $title = $report->title) =~ s/ /\\s+/;
+    my $body = $email->body;
+
+    like $body, qr#report/$report_id\s+-\s+$title#, 'email contains expected title';
+};
 
 $report->geocode(
 {
@@ -333,9 +324,12 @@ foreach my $test (
         $report->geocode( $g );
         $report->update();
 
-        FixMyStreet::App->model('DB::AlertType')->email_alerts();
+        FixMyStreet::override_config {
+            MAPIT_URL => 'http://mapit.mysociety.org/',
+        }, sub {
+            FixMyStreet::App->model('DB::AlertType')->email_alerts();
+        };
 
-        $mech->email_count_is( 1 );
         my $email = $mech->get_email;
         my $body = $email->body;
 
@@ -347,7 +341,180 @@ foreach my $test (
     };
 }
 
-$report->comments->delete();
-$report->delete();
-done_testing();
+my $ward_alert = FixMyStreet::App->model('DB::Alert')->find_or_create(
+    {
+        user => $user,
+        parameter => 7117,
+        alert_type => 'area_problems',
+        whensubscribed => $dt->ymd . ' ' . $dt->hms,
+        confirmed => 1,
+        cobrand => 'lichfielddc',
+    }
+);
 
+my $report_to_council = FixMyStreet::App->model('DB::Problem')->find_or_create(
+    {
+        postcode           => 'WS13 6YY',
+        bodies_str         => '2434',
+        areas              => ',105255,11806,11828,2247,2504,7117,',
+        category           => 'Other',
+        title              => 'council report',
+        detail             => 'Test 2 Detail',
+        used_map           => 't',
+        name               => 'Test User',
+        anonymous          => 'f',
+        state              => 'closed',
+        confirmed          => $now->ymd . ' ' . $now->hms,
+        lang               => 'en-gb',
+        service            => '',
+        cobrand            => 'default',
+        cobrand_data       => '',
+        send_questionnaire => 't',
+        latitude           => '52.727588',
+        longitude          => '-1.731322',
+        user_id            => $user2->id,
+    }
+);
+
+my $report_to_county_council = FixMyStreet::App->model('DB::Problem')->find_or_create(
+    {
+        postcode           => 'WS13 6YY',
+        bodies_str         => '2240',
+        areas              => ',105255,11806,11828,2247,2504,7117,',
+        category           => 'Other',
+        title              => 'county report',
+        detail             => 'Test 2 Detail',
+        used_map           => 't',
+        name               => 'Test User',
+        anonymous          => 'f',
+        state              => 'closed',
+        confirmed          => $now->ymd . ' ' . $now->hms,
+        lang               => 'en-gb',
+        service            => '',
+        cobrand            => 'default',
+        cobrand_data       => '',
+        send_questionnaire => 't',
+        latitude           => '52.727588',
+        longitude          => '-1.731322',
+        user_id            => $user2->id,
+    }
+);
+
+my $report_outside_district = FixMyStreet::App->model('DB::Problem')->find_or_create(
+    {
+        postcode           => 'WS13 6YY',
+        bodies_str         => '2221',
+        areas              => ',105255,11806,11828,2247,2504,7117,',
+        category           => 'Other',
+        title              => 'outside district report',
+        detail             => 'Test 2 Detail',
+        used_map           => 't',
+        name               => 'Test User',
+        anonymous          => 'f',
+        state              => 'closed',
+        confirmed          => $now->ymd . ' ' . $now->hms,
+        lang               => 'en-gb',
+        service            => '',
+        cobrand            => 'default',
+        cobrand_data       => '',
+        send_questionnaire => 't',
+        latitude           => '52.7352866189',
+        longitude          => '-1.69540489214',
+        user_id            => $user2->id,
+    }
+);
+
+subtest "check alerts from cobrand send main site url for alerts for different council" => sub {
+    $mech->clear_emails_ok;
+
+    my $sent = FixMyStreet::App->model('DB::AlertSent')->search(
+        {
+            alert_id => $ward_alert->id,
+        }
+    )->delete;
+
+    FixMyStreet::override_config {
+        MAPIT_URL => 'http://mapit.mysociety.org/',
+    }, sub {
+        FixMyStreet::App->model('DB::AlertType')->email_alerts();
+    };
+
+    my $email = $mech->get_email;
+    my $body = $email->body;
+
+    my $expected1 = mySociety::Config::get('BASE_URL') . '/report/' . $report_to_county_council->id;
+    my $expected3 = mySociety::Config::get('BASE_URL') . '/report/' . $report_outside_district->id;
+    my $cobrand = FixMyStreet::Cobrand->get_class_for_moniker('lichfielddc')->new();
+    my $expected2 = $cobrand->base_url . '/report/' . $report_to_council->id;
+
+    like $body, qr#$expected1#, 'non cobrand area report point to fixmystreet.com';
+    like $body, qr#$expected2#, 'cobrand area report point to cobrand url';
+    like $body, qr#$expected3#, 'report outside district report point to fixmystreet.com';
+};
+
+
+my $local_alert = FixMyStreet::App->model('DB::Alert')->find_or_create(
+    {
+        user => $user,
+        parameter => -1.731322,
+        parameter2 => 52.727588,
+        alert_type => 'local_problems',
+        whensubscribed => $dt->ymd . ' ' . $dt->hms,
+        cobrand     => 'lichfielddc',
+        confirmed => 1,
+    }
+);
+
+subtest "check local alerts from cobrand send main site url for alerts for different council" => sub {
+    $mech->clear_emails_ok;
+
+    my $sent = FixMyStreet::App->model('DB::AlertSent')->search(
+        {
+            alert_id => $local_alert->id,
+        }
+    )->delete;
+
+    FixMyStreet::App->model('DB::AlertType')->email_alerts();
+
+    my $email = $mech->get_email;
+    my $body = $email->body;
+
+    my $expected1 = mySociety::Config::get('BASE_URL') . '/report/' . $report_to_county_council->id;
+    my $cobrand = FixMyStreet::Cobrand->get_class_for_moniker('lichfielddc')->new();
+    my $expected2 = $cobrand->base_url . '/report/' . $report_to_council->id;
+
+    like $body, qr#$expected1#, 'non cobrand area report point to fixmystreet.com';
+    like $body, qr#$expected2#, 'cobrand area report point to cobrand url';
+};
+
+# Test that email alerts are sent in the right language.
+subtest "correct i18n-ed summary for state of closed" => sub {
+    $mech->clear_emails_ok;
+
+    $report->update( { state => 'closed' } );
+    $alert->update( { lang => 'nb', cobrand => 'fiksgatami' } );
+
+    FixMyStreet::App->model('DB::AlertSent')->search( {
+        alert_id => $alert->id,
+        parameter => $comment->id,
+    } )->delete;
+
+    FixMyStreet::override_config {
+        ALLOWED_COBRANDS => [ 'fiksgatami' ],
+    }, sub {
+        FixMyStreet::App->model('DB::AlertType')->email_alerts();
+    };
+
+    $mech->email_count_is( 1 );
+    my $email = $mech->get_email;
+    my $body = $email->body;
+    my $msg = 'Denne rapporten er for tiden markert som lukket';
+    like $body, qr/$msg/, 'email says problem is closed, in Norwegian';
+};
+
+END {
+    $mech->delete_user($user) if $user;
+    $mech->delete_user($user2) if $user2;
+    $mech->delete_user($user3) if $user3;
+    done_testing();
+}

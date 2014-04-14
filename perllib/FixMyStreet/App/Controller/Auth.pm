@@ -7,6 +7,7 @@ BEGIN { extends 'Catalyst::Controller'; }
 use Email::Valid;
 use Net::Domain::TLD;
 use mySociety::AuthToken;
+use JSON;
 
 =head1 NAME
 
@@ -156,11 +157,8 @@ sub token : Path('/M') : Args(1) {
     # Sign out in case we are another user
     $c->logout();
 
-    # get the email and scrap the token
-    my $data = $token_obj->data;
-    $token_obj->delete;
-
     # find or create the user related to the token.
+    my $data = $token_obj->data;
     my $user = $c->model('DB::User')->find_or_create( { email => $data->{email} } );
     $user->name( $data->{name} ) if $data->{name};
     $user->password( $data->{password}, 1 ) if $data->{password};
@@ -181,6 +179,10 @@ Used after signing in to take the person back to where they were.
 sub redirect_on_signin : Private {
     my ( $self, $c, $redirect ) = @_;
     $redirect = 'my' unless $redirect;
+    if ( $c->cobrand->moniker eq 'zurich' ) {
+        $redirect = 'my' if $redirect eq 'admin';
+        $redirect = 'admin' if $c->user->from_body;
+    }
     $c->res->redirect( $c->uri_for( "/$redirect" ) );
 }
 
@@ -248,6 +250,54 @@ Log the user out. Tell them we've done so.
 sub sign_out : Local {
     my ( $self, $c ) = @_;
     $c->logout();
+}
+
+sub ajax_sign_in : Path('ajax/sign_in') {
+    my ( $self, $c ) = @_;
+
+    my $return = {};
+    if ( $c->forward( 'sign_in' ) ) {
+        $return->{name} = $c->user->name;
+    } else {
+        $return->{error} = 1;
+    }
+
+    my $body = JSON->new->utf8(1)->encode( $return );
+    $c->res->content_type('application/json; charset=utf-8');
+    $c->res->body($body);
+
+    return 1;
+}
+
+sub ajax_sign_out : Path('ajax/sign_out') {
+    my ( $self, $c ) = @_;
+
+    $c->logout();
+
+    my $body = JSON->new->utf8(1)->encode( { signed_out => 1 } );
+    $c->res->content_type('application/json; charset=utf-8');
+    $c->res->body($body);
+
+    return 1;
+}
+
+sub ajax_check_auth : Path('ajax/check_auth') {
+    my ( $self, $c ) = @_;
+
+    my $code = 401;
+    my $data = { not_authorized => 1 };
+
+    if ( $c->user ) {
+        $data = { name => $c->user->name };
+        $code = 200;
+    }
+
+    my $body = JSON->new->utf8(1)->encode( $data );
+    $c->res->content_type('application/json; charset=utf-8');
+    $c->res->code($code);
+    $c->res->body($body);
+
+    return 1;
 }
 
 =head2 check_auth

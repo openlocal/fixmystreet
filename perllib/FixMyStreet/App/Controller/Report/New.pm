@@ -4,10 +4,7 @@ use Moose;
 use namespace::autoclean;
 BEGIN { extends 'Catalyst::Controller'; }
 
-use FixMyStreet::Geocode;
-use Digest::SHA1 qw(sha1_hex);
 use Encode;
-use Image::Magick;
 use List::MoreUtils qw(uniq);
 use POSIX 'strcoll';
 use HTML::Entities;
@@ -15,7 +12,6 @@ use mySociety::MaPit;
 use Path::Class;
 use Utils;
 use mySociety::EmailUtil;
-use mySociety::TempFiles;
 use JSON;
 
 =head1 NAME
@@ -78,6 +74,9 @@ partial
 
 =cut
 
+use constant COUNCIL_ID_BARNET => 2489;
+use constant COUNCIL_ID_BROMLEY => 2482;
+
 sub report_new : Path : Args(0) {
     my ( $self, $c ) = @_;
 
@@ -90,17 +89,80 @@ sub report_new : Path : Args(0) {
 
     # create a problem from the submitted details
     $c->stash->{template} = "report/new/fill_in_details.html";
-    $c->forward('setup_categories_and_councils');
+    $c->forward('setup_categories_and_bodies');
     $c->forward('generate_map');
+    $c->forward('check_for_category');
 
     # deal with the user and report and check both are happy
     return unless $c->forward('check_form_submitted');
     $c->forward('process_user');
     $c->forward('process_report');
-    $c->forward('process_photo');
+    $c->forward('/photo/process_photo');
     return unless $c->forward('check_for_errors');
     $c->forward('save_user_and_report');
     $c->forward('redirect_or_confirm_creation');
+}
+
+# This is for the new phonegap versions of the app. It looks a lot like
+# report_new but there's a few workflow differences as we only ever want
+# to sent JSON back here
+
+sub report_new_ajax : Path('mobile') : Args(0) {
+    my ( $self, $c ) = @_;
+
+    # create the report - loading a partial if available
+    $c->forward('initialize_report');
+
+    unless ( $c->forward('determine_location') ) {
+        $c->stash->{ json_response } = { errors => 'Unable to determine location' };
+        $c->forward('send_json_response');
+        return 1;
+    }
+
+    $c->forward('setup_categories_and_bodies');
+    $c->forward('process_user');
+    $c->forward('process_report');
+    $c->forward('/photo/process_photo');
+
+    unless ($c->forward('check_for_errors')) {
+        $c->stash->{ json_response } = { errors => $c->stash->{field_errors} };
+        $c->stash->{ json_response }->{check_name} = $c->user->name if $c->stash->{check_name};
+        $c->forward('send_json_response');
+        return 1;
+    }
+
+    $c->forward('save_user_and_report');
+
+    my $report = $c->stash->{report};
+    my $data = $c->stash->{token_data} || {};
+    my $token = $c->model("DB::Token")->create( {
+        scope => 'problem',
+        data => {
+            %$data,
+            id => $report->id
+        }
+    } );
+    if ( $report->confirmed ) {
+        $c->stash->{ json_response } = { success => 1, report => $report->id };
+    } else {
+        $c->stash->{token_url} = $c->uri_for_email( '/P', $token->token );
+        $c->send_email( 'problem-confirm.txt', {
+            to => [ $report->name ? [ $report->user->email, $report->name ] : $report->user->email ],
+        } );
+        $c->stash->{ json_response } = { success => 1 };
+    }
+
+    $c->forward('send_json_response');
+}
+
+sub send_json_response : Private {
+    my ( $self, $c ) = @_;
+
+    my $body = JSON->new->utf8(1)->encode(
+        $c->stash->{json_response},
+    );
+    $c->res->content_type('application/json; charset=utf-8');
+    $c->res->body($body);
 }
 
 sub report_form_ajax : Path('ajax') : Args(0) {
@@ -118,18 +180,24 @@ sub report_form_ajax : Path('ajax') : Args(0) {
         return;
     }
 
-    $c->forward('setup_categories_and_councils');
+    $c->forward('setup_categories_and_bodies');
 
     # render templates to get the html
     my $category = $c->render_fragment( 'report/new/category.html');
     my $councils_text = $c->render_fragment( 'report/new/councils_text.html');
-    my $has_open311 = keys %{ $c->stash->{category_extras} };
+    my $extra_name_info = $c->stash->{extra_name_info}
+        ? $c->render_fragment('report/new/extra_name.html')
+        : '';
+
+    my $extra_titles_list = $c->cobrand->title_list($c->stash->{all_areas});
 
     my $body = JSON->new->utf8(1)->encode(
         {
             councils_text   => $councils_text,
             category        => $category,
-            has_open311     => $has_open311,
+            extra_name_info => $extra_name_info,
+            titles_list     => $extra_titles_list,
+            categories      => $c->stash->{category_options},
         }
     );
 
@@ -151,10 +219,10 @@ sub category_extras_ajax : Path('category_extras') : Args(0) {
         $c->res->body($body);
         return 1;
     }
-    $c->forward('setup_categories_and_councils');
+    $c->forward('setup_categories_and_bodies');
 
     my $category_extra = '';
-    if ( $c->stash->{category_extras}->{ $c->req->param('category') } ) {
+    if ( $c->stash->{category_extras}->{ $c->req->param('category') } && @{ $c->stash->{category_extras}->{ $c->req->param('category') } } >= 1  ) {
         $c->stash->{report_meta} = {};
         $c->stash->{report} = { category => $c->req->param('category') };
         $c->stash->{category_extras} = { $c->req->param('category' ) => $c->stash->{category_extras}->{ $c->req->param('category') } };
@@ -209,7 +277,7 @@ sub report_import : Path('/import') {
     }
 
     # handle the photo upload
-    $c->forward( 'process_photo_upload' );
+    $c->forward( '/photo/process_photo_upload' );
     my $fileid = $c->stash->{upload_fileid};
     if ( my $error = $c->stash->{photo_error} ) {
         push @errors, $error;
@@ -394,6 +462,13 @@ sub initialize_report : Private {
 
     }
 
+    if ( $c->req->param('first_name') && $c->req->param('last_name') ) {
+        $c->stash->{first_name} = $c->req->param('first_name');
+        $c->stash->{last_name} = $c->req->param('last_name');
+
+        $c->req->param( 'name', sprintf( '%s %s', $c->req->param('first_name'), $c->req->param('last_name') ) );
+    }
+
     # Capture whether the map was used
     $report->used_map( $c->req->param('skipped') ? 0 : 1 );
 
@@ -497,37 +572,45 @@ sub determine_location_from_report : Private {
     return;
 }
 
-=head2 setup_categories_and_councils
+=head2 setup_categories_and_bodies
 
-Look up categories for this council or councils
+Look up categories for the relevant body or bodies.
 
 =cut
 
-sub setup_categories_and_councils : Private {
+sub setup_categories_and_bodies : Private {
     my ( $self, $c ) = @_;
 
-    my $all_councils = $c->stash->{all_councils};
-    my $first_council = ( values %$all_councils )[0];
+    my $all_areas = $c->stash->{all_areas};
+    my $first_area = ( values %$all_areas )[0];
+
+    my @bodies = $c->model('DB::Body')->search(
+        { 'body_areas.area_id' => [ keys %$all_areas ], deleted => 0 },
+        { join => 'body_areas' }
+    )->all;
+    my %bodies = map { $_->id => $_ } @bodies;
+    my $first_body = ( values %bodies )[0];
 
     my @contacts                #
       = $c                      #
       ->model('DB::Contact')    #
       ->not_deleted             #
-      ->search( { area_id => [ keys %$all_councils ] } )    #
+      ->search( { body_id => [ keys %bodies ] } )
       ->all;
 
     # variables to populate
-    my %area_ids_to_list = ();       # Areas with categories assigned
+    my %bodies_to_list = ();       # Bodies with categories assigned
     my @category_options = ();       # categories to show
-    my $category_label   = undef;    # what to call them
     my %category_extras  = ();       # extra fields to fill in for open311
+    my %non_public_categories =
+      ();    # categories for which the reports are not public
 
     # FIXME - implement in cobrand
     if ( $c->cobrand->moniker eq 'emptyhomes' ) {
 
-        # add all areas found to the list
+        # add all bodies found to the list
         foreach (@contacts) {
-            $area_ids_to_list{ $_->area_id } = 1;
+            $bodies_to_list{ $_->body_id } = 1;
         }
 
         # set our own categories
@@ -540,16 +623,20 @@ sub setup_categories_and_councils : Private {
             _('Empty pub or bar'),
             _('Empty public building - school, hospital, etc.')
         );
-        $category_label = _('Property type:');
 
-    } elsif ($first_council->{type} eq 'LBO') {
+    } elsif ($first_area->{id} != COUNCIL_ID_BROMLEY && $first_area->{type} eq 'LBO') {
 
-        $area_ids_to_list{ $first_council->{id} } = 1;
+        $bodies_to_list{ $first_body->id } = 1;
+        my @local_categories;
+        if ($first_area->{id} == COUNCIL_ID_BARNET) {
+            @local_categories =  sort keys %{ Utils::barnet_categories() }
+        } else {
+            @local_categories =  sort keys %{ Utils::london_categories() }            
+        }
         @category_options = (
             _('-- Pick a category --'),
-            sort keys %{ Utils::london_categories() }
+            @local_categories 
         );
-        $category_label = _('Category:');
 
     } else {
 
@@ -559,47 +646,51 @@ sub setup_categories_and_councils : Private {
         my %seen;
         foreach my $contact (@contacts) {
 
-            $area_ids_to_list{ $contact->area_id } = 1;
-
-            next    # TODO - move this to the cobrand
-              if $c->cobrand->moniker eq 'southampton'
-                  && $contact->category =~ /Street lighting|Traffic lights/;
-
-            next if $contact->category eq _('Other');
+            $bodies_to_list{ $contact->body_id } = 1;
 
             unless ( $seen{$contact->category} ) {
                 push @category_options, $contact->category;
 
                 $category_extras{ $contact->category } = $contact->extra
                     if $contact->extra;
+
+                $non_public_categories{ $contact->category } = 1 if $contact->non_public;
             }
             $seen{$contact->category} = 1;
         }
 
         if (@category_options) {
-            @category_options =
-              ( _('-- Pick a category --'), @category_options, _('Other') );
-            $category_label = _('Category:');
+            # If there's an Other category present, put it at the bottom
+            @category_options = ( _('-- Pick a category --'), grep { $_ ne _('Other') } @category_options );
+            push @category_options, _('Other') if $seen{_('Other')};
         }
     }
 
+    if ($c->cobrand->can('hidden_categories')) {
+        my %hidden_categories = map { $_ => 1 }
+            $c->cobrand->hidden_categories;
+
+        @category_options = grep { 
+            !$hidden_categories{$_} 
+            } @category_options;
+    }
+
     # put results onto stash for display
-    $c->stash->{area_ids_to_list} = [ keys %area_ids_to_list ];
-    $c->stash->{category_label}   = $category_label;
+    $c->stash->{bodies} = \%bodies;
+    $c->stash->{all_body_names} = [ map { $_->name } values %bodies ];
+    $c->stash->{all_body_urls} = [ map { $_->external_url } values %bodies ];
+    $c->stash->{bodies_to_list} = [ keys %bodies_to_list ];
     $c->stash->{category_options} = \@category_options;
     $c->stash->{category_extras}  = \%category_extras;
+    $c->stash->{non_public_categories}  = \%non_public_categories;
     $c->stash->{category_extras_json}  = encode_json \%category_extras;
+    $c->stash->{extra_name_info} = $first_area->{id} == COUNCIL_ID_BROMLEY ? 1 : 0;
 
-    my @missing_details_councils =
-      grep { !$area_ids_to_list{$_} }    #
-      keys %$all_councils;
+    my @missing_details_bodies = grep { !$bodies_to_list{$_->id} } values %bodies;
+    my @missing_details_body_names = map { $_->name } @missing_details_bodies;
 
-    my @missing_details_council_names =
-      map { $all_councils->{$_}->{name} }     #
-      @missing_details_councils;
-
-    $c->stash->{missing_details_councils}      = \@missing_details_councils;
-    $c->stash->{missing_details_council_names} = \@missing_details_council_names;
+    $c->stash->{missing_details_bodies} = \@missing_details_bodies;
+    $c->stash->{missing_details_body_names} = \@missing_details_body_names;
 }
 
 =head2 check_form_submitted
@@ -628,20 +719,30 @@ sub process_user : Private {
 
     my $report = $c->stash->{report};
 
+    # Extract all the params to a hash to make them easier to work with
+    my %params = map { $_ => scalar $c->req->param($_) }
+      ( 'email', 'name', 'phone', 'password_register', 'fms_extra_title' );
+
+    my $user_title = Utils::trim_text( $params{fms_extra_title} );
+
+    if ( $c->cobrand->allow_anonymous_reports ) {
+        my $anon_details = $c->cobrand->anonymous_account;
+
+        for my $key ( qw( email name ) ) {
+            $params{ $key } ||= $anon_details->{ $key };
+        }
+    }
+
     # The user is already signed in
     if ( $c->user_exists ) {
         my $user = $c->user->obj;
-        my %params = map { $_ => scalar $c->req->param($_) } ( 'name', 'phone' );
         $user->name( Utils::trim_text( $params{name} ) ) if $params{name};
         $user->phone( Utils::trim_text( $params{phone} ) );
+        $user->title( $user_title ) if $user_title;
         $report->user( $user );
         $report->name( $user->name );
         return 1;
     }
-
-    # Extract all the params to a hash to make them easier to work with
-    my %params = map { $_ => scalar $c->req->param($_) }
-      ( 'email', 'name', 'phone', 'password_register' );
 
     # cleanup the email address
     my $email = $params{email} ? lc $params{email} : '';
@@ -659,6 +760,7 @@ sub process_user : Private {
         my $user = $c->user->obj;
         $report->user( $user );
         $report->name( $user->name );
+        $c->stash->{check_name} = 1;
         $c->stash->{field_errors}->{name} = _('You have successfully signed in; please check and confirm your details are accurate:');
         $c->log->info($user->id . ' logged in during problem creation');
         return 1;
@@ -669,6 +771,7 @@ sub process_user : Private {
     $report->user->phone( Utils::trim_text( $params{phone} ) );
     $report->user->password( Utils::trim_text( $params{password_register} ) )
         if $params{password_register};
+    $report->user->title( $user_title ) if $user_title;
     $report->name( Utils::trim_text( $params{name} ) );
 
     return 1;
@@ -691,9 +794,12 @@ sub process_report : Private {
       (
         'title', 'detail', 'pc',                 #
         'detail_size', 'detail_depth',
+        'detail_offensive',
         'may_show_name',                         #
         'category',                              #
+        'subcategory',                              #
         'partial',                               #
+        'service',                               #
       );
 
     # load the report
@@ -703,6 +809,7 @@ sub process_report : Private {
     $report->postcode( $params{pc} );
     $report->latitude( $c->stash->{latitude} );
     $report->longitude( $c->stash->{longitude} );
+    $report->send_questionnaire( $c->cobrand->send_questionnaires() );
 
     # set some simple bool values (note they get inverted)
     $report->anonymous( $params{may_show_name} ? 0 : 1 );
@@ -711,63 +818,83 @@ sub process_report : Private {
     $report->title( Utils::cleanup_text( $params{title} ) );
 
     my $detail = Utils::cleanup_text( $params{detail}, { allow_multiline => 1 } );
-    for my $w ('depth', 'size') {
+    for my $w ('depth', 'size', 'offensive') {
         next unless $params{"detail_$w"};
         next if $params{"detail_$w"} eq '-- Please select --';
         $detail .= "\n\n\u$w: " . $params{"detail_$w"};
     }
     $report->detail( $detail );
 
+    # mobile device type
+    $report->service( $params{service} ) if $params{service};
+
     # set these straight from the params
     $report->category( _ $params{category} ) if $params{category};
 
-    my $areas = $c->stash->{all_areas};
+    $report->subcategory( $params{subcategory} );
+
+    my $areas = $c->stash->{all_areas_mapit};
     $report->areas( ',' . join( ',', sort keys %$areas ) . ',' );
 
     # From earlier in the process.
-    my $councils = $c->stash->{all_councils};
-    my $first_council = ( values %$councils )[0];
+    $areas = $c->stash->{all_areas};
+    my $bodies = $c->stash->{bodies};
+    my $first_area = ( values %$areas )[0];
+    my $first_body = ( values %$bodies )[0];
 
     if ( $c->cobrand->moniker eq 'emptyhomes' ) {
 
-        $councils = join( ',', @{ $c->stash->{area_ids_to_list} } ) || -1;
-        $report->council( $councils );
+        $bodies = join( ',', @{ $c->stash->{bodies_to_list} } ) || -1;
+        $report->bodies_str( $bodies );
 
-    } elsif ( $first_council->{type} eq 'LBO') {
+        my %extra;
+        $c->cobrand->process_extras( $c, undef, \%extra );
+        if ( %extra ) {
+            $report->extra( \%extra );
+        }
 
+    } elsif ( $first_area->{id} == COUNCIL_ID_BARNET ) {
+
+        unless ( exists Utils::barnet_categories()->{ $report->category } ) {
+            $c->stash->{field_errors}->{category} = _('Please choose a category');
+        }
+        $report->bodies_str( $first_body->id );
+        
+    } elsif ( $first_area->{id} != COUNCIL_ID_BROMLEY && $first_area->{type} eq 'LBO') {
+        
         unless ( Utils::london_categories()->{ $report->category } ) {
             $c->stash->{field_errors}->{category} = _('Please choose a category');
         }
-        $report->council( $first_council->{id} );
+        $report->bodies_str( $first_body->id );
 
     } elsif ( $report->category ) {
 
-        # FIXME All contacts were fetched in setup_categories_and_councils,
+        # FIXME All contacts were fetched in setup_categories_and_bodies,
         # so can this DB call also be avoided?
         my @contacts = $c->       #
           model('DB::Contact')    #
           ->not_deleted           #
           ->search(
             {
-                area_id  => [ keys %$councils ],
+                body_id => [ keys %$bodies ],
                 category => $report->category
             }
           )->all;
 
         unless ( @contacts ) {
             $c->stash->{field_errors}->{category} = _('Please choose a category');
-            $report->council( -1 );
+            $report->bodies_str( -1 );
             return 1;
         }
 
-        # construct the council string:
-        #  'x,x'     - x are council IDs that have this category
-        #  'x,x|y,y' - x are council IDs that have this category, y council IDs with *no* contact
-        my $council_string = join( ',', map { $_->area_id } @contacts );
-        $council_string .=
-          '|' . join( ',', @{ $c->stash->{missing_details_councils} } )
-            if $council_string && @{ $c->stash->{missing_details_councils} };
-        $report->council($council_string);
+        # construct the bodies string:
+        #  'x,x' - x are body IDs that have this category
+        #  'x,x|y' - x are body IDs that have this category, y body IDs with *no* contact
+        my $body_string = join( ',', map { $_->body_id } @contacts );
+        $body_string .=
+          '|' . join( ',', map { $_->id } @{ $c->stash->{missing_details_bodies} } )
+            if $body_string && @{ $c->stash->{missing_details_bodies} };
+        $report->bodies_str($body_string);
 
         my @extra = ();
         my $metas = $contacts[0]->extra;
@@ -785,11 +912,17 @@ sub process_report : Private {
             };
         }
 
+        if ( $c->stash->{non_public_categories}->{ $report->category } ) {
+            $report->non_public( 1 );
+        }
+
+        $c->cobrand->process_extras( $c, $contacts[0]->body_id, \@extra );
+
         if ( @extra ) {
-            $c->stash->{report_meta} = \@extra;
+            $c->stash->{report_meta} = { map { $_->{name} => $_ } @extra };
             $report->extra( \@extra );
         }
-    } elsif ( @{ $c->stash->{area_ids_to_list} } ) {
+    } elsif ( @{ $c->stash->{bodies_to_list} } ) {
 
         # There was an area with categories, but we've not been given one. Bail.
         $c->stash->{field_errors}->{category} = _('Please choose a category');
@@ -798,7 +931,7 @@ sub process_report : Private {
 
         # If we're here, we've been submitted somewhere
         # where we have no contact information at all.
-        $report->council( -1 );
+        $report->bodies_str( -1 );
 
     }
 
@@ -807,94 +940,9 @@ sub process_report : Private {
 
     # save the cobrand and language related information
     $report->cobrand( $c->cobrand->moniker );
-    $report->cobrand_data( $c->cobrand->extra_problem_data );
+    $report->cobrand_data( '' );
     $report->lang( $c->stash->{lang_code} );
 
-    return 1;
-}
-
-=head2 process_photo
-
-Handle the photo - either checking and storing it after an upload or retrieving
-it from the cache.
-
-Store any error message onto 'photo_error' in stash.
-=cut
-
-sub process_photo : Private {
-    my ( $self, $c ) = @_;
-
-    return
-         $c->forward('process_photo_upload')
-      || $c->forward('process_photo_cache')
-      || 1;    # always return true
-}
-
-sub process_photo_upload : Private {
-    my ( $self, $c ) = @_;
-
-    # check for upload or return
-    my $upload = $c->req->upload('photo')
-      || return;
-
-    # check that the photo is a jpeg
-    my $ct = $upload->type;
-    unless ( $ct eq 'image/jpeg' || $ct eq 'image/pjpeg' ) {
-        $c->stash->{photo_error} = _('Please upload a JPEG image only');
-        return;
-    }
-
-    # get the photo into a variable
-    my $photo_blob = eval {
-        my $filename = $upload->tempname;
-        my $out = `jhead -se -autorot $filename`;
-        my $photo = $upload->slurp;
-        return $photo;
-    };
-    if ( my $error = $@ ) {
-        my $format = _(
-"That image doesn't appear to have uploaded correctly (%s), please try again."
-        );
-        $c->stash->{photo_error} = sprintf( $format, $error );
-        return;
-    }
-
-    # we have an image we can use - save it to the upload dir for storage
-    my $cache_dir = dir( $c->config->{UPLOAD_DIR} );
-    $cache_dir->mkpath;
-    unless ( -d $cache_dir && -w $cache_dir ) {
-        warn "Can't find/write to photo cache directory '$cache_dir'";
-        return;
-    }
-
-    my $fileid = sha1_hex($photo_blob);
-    $upload->copy_to( file($cache_dir, $fileid . '.jpeg') );
-
-    # stick the hash on the stash, so don't have to reupload in case of error
-    $c->stash->{upload_fileid} = $fileid;
-
-    return 1;
-}
-
-=head2 process_photo_cache
-
-Look for the upload_fileid parameter and check it matches a file on disk. If it
-does return true and put fileid on stash, otherwise false.
-
-=cut
-
-sub process_photo_cache : Private {
-    my ( $self, $c ) = @_;
-
-    # get the fileid and make sure it is just a hex number
-    my $fileid = $c->req->param('upload_fileid') || '';
-    $fileid =~ s{[^0-9a-f]}{}gi;
-    return unless $fileid;
-
-    my $file = file( $c->config->{UPLOAD_DIR}, "$fileid.jpeg" );
-    return unless -e $file;
-
-    $c->stash->{upload_fileid} = $fileid;
     return 1;
 }
 
@@ -910,11 +958,25 @@ sub check_for_errors : Private {
 
     # let the model check for errors
     $c->stash->{field_errors} ||= {};
-    my %field_errors = (
-        %{ $c->stash->{field_errors} },
-        %{ $c->stash->{report}->user->check_for_errors },
-        %{ $c->stash->{report}->check_for_errors },
-    );
+    my %field_errors = $c->cobrand->report_check_for_errors( $c );
+
+    # Zurich, we don't care about title or name
+    # There is no title, and name is optional
+    if ( $c->cobrand->moniker eq 'zurich' ) {
+        delete $field_errors{title};
+        delete $field_errors{name};
+        my $report = $c->stash->{report};
+        $report->title( Utils::cleanup_text( substr($report->detail, 0, 25) ) );
+
+        # We only want to validate the phone number web requests (where the
+        # service parameter is blank) because previous versions of the mobile
+        # apps don't validate the presence of a phone number.
+        if ( ! $c->req->param('phone') and ! $c->req->param('service') ) {
+            $field_errors{phone} = _("This information is required");
+        }
+    }
+
+    # FIXME: need to check for required bromley fields here
 
     # if they're got the login details wrong when signing in then
     # we don't care about the name field even though it's validated
@@ -950,23 +1012,34 @@ sub save_user_and_report : Private {
     my $report      = $c->stash->{report};
 
     # Save or update the user if appropriate
-    if ( !$report->user->in_storage ) {
+    if ( $c->cobrand->never_confirm_reports ) {
+        if ( $report->user->in_storage() ) {
+            $report->user->update();
+        } else {
+            $report->user->insert();
+        }
+        $report->confirm();
+    } elsif ( !$report->user->in_storage ) {
         # User does not exist.
         # Store changes in token for when token is validated.
         $c->stash->{token_data} = {
             name => $report->user->name,
             phone => $report->user->phone,
             password => $report->user->password,
+            title   => $report->user->title,
         };
         $report->user->name( undef );
         $report->user->phone( undef );
         $report->user->password( '', 1 );
+        $report->user->title( undef );
         $report->user->insert();
         $c->log->info($report->user->id . ' created for this report');
     }
     elsif ( $c->user && $report->user->id == $c->user->id ) {
+        # Logged in and matches, so instantly confirm (except Zurich, with no confirmation)
         $report->user->update();
-        $report->confirm;
+        $report->confirm
+            unless $c->cobrand->moniker eq 'zurich';
         $c->log->info($report->user->id . ' is logged in for this report');
     }
     else {
@@ -976,6 +1049,7 @@ sub save_user_and_report : Private {
             name => $report->user->name,
             phone => $report->user->phone,
             password => $report->user->password,
+            title   => $report->user->title,
         };
         $report->user->discard_changes();
         $c->log->info($report->user->id . ' exists, but is not logged in for this report');
@@ -990,8 +1064,15 @@ sub save_user_and_report : Private {
     $report->category( _('Other') ) unless $report->category;
 
     # Set unknown to DB unknown
-    $report->council( undef ) if $report->council eq '-1';
+    $report->bodies_str( undef ) if $report->bodies_str eq '-1';
 
+    # if there is a Message Manager message ID, pass it back to the client view
+    if ($c->cobrand->moniker eq 'fixmybarangay' && $c->req->param('external_source_id')=~/^\d+$/) {
+        $c->stash->{external_source_id} = $c->req->param('external_source_id');
+        $report->external_source_id( $c->req->param('external_source_id') );
+        $report->external_source( $c->config->{MESSAGE_MANAGER_URL} ) ;
+    }
+    
     # save the report;
     $report->in_storage ? $report->update : $report->insert();
 
@@ -1039,6 +1120,14 @@ sub generate_map : Private {
     return 1;
 }
 
+sub check_for_category : Private {
+    my ( $self, $c ) = @_;
+
+    $c->stash->{category} = $c->req->param('category');
+
+    return 1;
+}
+
 =head2 redirect_or_confirm_creation
 
 Now that the report has been created either redirect the user to its page if it
@@ -1054,8 +1143,19 @@ sub redirect_or_confirm_creation : Private {
     if ( $report->confirmed ) {
         # Subscribe problem reporter to email updates
         $c->forward( 'create_reporter_alert' );
-        my $report_uri = $c->uri_for( '/report', $report->id );
+        my $report_uri;
+
+        if ( $c->cobrand->moniker eq 'fixmybarangay' && $c->user->from_body && $c->stash->{external_source_id}) {
+            $report_uri = $c->uri_for( '/report', $report->id, undef, { external_source_id => $c->stash->{external_source_id} } );
+        } elsif ( $c->cobrand->never_confirm_reports && $report->non_public ) {
+            $c->log->info( 'cobrand was set to always confirm reports and report was non public, success page showed');
+            $c->stash->{template} = 'report_created.html';
+            return 1;
+        } else {
+            $report_uri = $c->cobrand->base_url_for_report( $report ) . $report->url;
+        }
         $c->log->info($report->user->id . ' was logged in, redirecting to /report/' . $report->id);
+        $c->flash->{created_report} = 'loggedin';
         $c->res->redirect($report_uri);
         $c->detach;
     }
@@ -1071,7 +1171,7 @@ sub redirect_or_confirm_creation : Private {
     } );
     $c->stash->{token_url} = $c->uri_for_email( '/P', $token->token );
     $c->send_email( 'problem-confirm.txt', {
-        to => [ [ $report->user->email, $report->name ] ],
+        to => [ $report->name ? [ $report->user->email, $report->name ] : $report->user->email ],
     } );
 
     # tell user that they've been sent an email

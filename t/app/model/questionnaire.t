@@ -32,8 +32,6 @@ my $problem = FixMyStreet::App->model('DB::Problem')->create(
     }
 );
 
-diag $problem->id;
-
 my $mech = FixMyStreet::TestMech->new;
 
 for my $test ( 
@@ -62,6 +60,10 @@ for my $test (
         send_email => 1,
     },
     {
+        state => 'action scheduled',
+        send_email => 1,
+    },
+    {
         state => 'in progress',
         send_email => 1,
     },
@@ -75,6 +77,18 @@ for my $test (
     },
     {
         state => 'fixed - user',
+        send_email => 1,
+    },
+    {
+        state => 'duplicate',
+        send_email => 1,
+    },
+    {
+        state => 'unable to fix',
+        send_email => 1,
+    },
+    {
+        state => 'not responsible',
         send_email => 1,
     },
     {

@@ -26,12 +26,12 @@ else
     DATE="2007-02-01"
 fi
 
-SOURCEA=/tmp/bci-creation-rate-graph-data-$RANDOM$RANDOM
-SOURCEB=/tmp/bci-creation-rate-graph-data-$RANDOM$RANDOM
-SOURCEC=/tmp/bci-creation-rate-graph-data-$RANDOM$RANDOM
-SOURCED=/tmp/bci-creation-rate-graph-data-$RANDOM$RANDOM
-SOURCEE=/tmp/bci-creation-rate-graph-data-$RANDOM$RANDOM
-GPSCRIPT=/tmp/bci-creation-rate-graph-script-$RANDOM$RANDOM
+SOURCEA=/tmp/fms-creation-rate-graph-data-$RANDOM$RANDOM
+SOURCEB=/tmp/fms-creation-rate-graph-data-$RANDOM$RANDOM
+SOURCEC=/tmp/fms-creation-rate-graph-data-$RANDOM$RANDOM
+SOURCED=/tmp/fms-creation-rate-graph-data-$RANDOM$RANDOM
+SOURCEE=/tmp/fms-creation-rate-graph-data-$RANDOM$RANDOM
+GPSCRIPT=/tmp/fms-creation-rate-graph-script-$RANDOM$RANDOM
 
 #    where status in ('draft') 
 
@@ -49,13 +49,13 @@ function grab_data {
 grab_data "" $SOURCEA
 grab_data "where state not in ('unconfirmed')" $SOURCEB
 grab_data "where state not in ('unconfirmed', 'confirmed')" $SOURCEC
-grab_data "where state not in ('unconfirmed', 'confirmed', 'fixed')" $SOURCED
-grab_data "where state not in ('unconfirmed', 'confirmed', 'fixed', 'hidden')" $SOURCEE
+grab_data "where state not in ('unconfirmed', 'confirmed', 'fixed', 'fixed - council', 'fixed - user')" $SOURCED
+grab_data "where state not in ('unconfirmed', 'confirmed', 'fixed', 'fixed - council', 'fixed - user', 'hidden')" $SOURCEE
 
 
 #state = 'unconfirmed'
 #or state = 'confirmed'
-#or state = 'fixed'
+#or state in ('fixed', 'fixed - council', 'fixed - user')
 #or state = 'hidden'
 #or state = 'partial'
 
@@ -96,7 +96,7 @@ if [ -s $SOURCED ]; then
 echo -n >>$GPSCRIPT " \"$SOURCED\" using 1:2 with impulses lt 6 lw 15 title \"hidden\","
 fi
 if [ -s $SOURCEE ]; then
-echo -n >>$GPSCRIPT " \"$SOURCEE\" using 1:2 with impulses lt 7 lw 15 title \"partial (and any other types)\","
+echo -n >>$GPSCRIPT " \"$SOURCEE\" using 1:2 with impulses lt 7 lw 15 title \"any other type\","
 fi
 cat >>$GPSCRIPT <<END 
     "< awk 'BEGIN { n = 0 } { n += \$2; print \$1, \$2, n; }' $SOURCEA" using 1:3 axes x1y2 with lines lt 2 title "cumulative total number of problems"
@@ -104,6 +104,6 @@ END
 #echo "gpscript $GPSCRIPT"
 
 export GDFONTPATH=/usr/share/fonts/truetype/ttf-bitstream-vera
-gnuplot < $GPSCRIPT > fixmystreet/web/bci-live-creation$EXTENSION
+gnuplot < $GPSCRIPT > fixmystreet/web/fms-live-creation$EXTENSION 2>/dev/null
 
 
